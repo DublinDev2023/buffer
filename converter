@@ -1,0 +1,167 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using System.Threading.Tasks;
+using Avro;
+using Avro.Generic;
+using Confluent.Kafka;
+using Confluent.SchemaRegistry;
+using Confluent.SchemaRegistry.Serdes;
+
+class Program
+{
+    static async Task Main()
+    {
+        string schemaString = @"
+        {
+            ""type"": ""record"",
+            ""name"": ""UserEvent"",
+            ""fields"": [
+                { ""name"": ""Id"", ""type"": ""int"" },
+                { ""name"": ""Name"", ""type"": ""string"" },
+                { 
+                    ""name"": ""Address"", 
+                    ""type"": {
+                        ""type"": ""record"",
+                        ""name"": ""AddressRecord"",
+                        ""fields"": [
+                            { ""name"": ""Street"", ""type"": ""string"" },
+                            { ""name"": ""Zip"", ""type"": ""string"" }
+                        ]
+                    }
+                },
+                {
+                    ""name"": ""Tags"",
+                    ""type"": { ""type"": ""array"", ""items"": ""string"" }
+                },
+                {
+                    ""name"": ""Metadata"",
+                    ""type"": { ""type"": ""map"", ""values"": ""string"" }
+                }
+            ]
+        }";
+
+        var schema = (RecordSchema)Schema.Parse(schemaString);
+
+        var myObj = new
+        {
+            Id = 1,
+            Name = "Alice",
+            Address = new { Street = "Main St", Zip = "12345" },
+            Tags = new[] { "alpha", "beta" },
+            Metadata = new Dictionary<string, string> { ["source"] = "web", ["campaign"] = "xmas" }
+        };
+
+        var genericRecord = ConvertToGenericRecord(myObj, schema);
+
+        var producerConfig = new ProducerConfig
+        {
+            BootstrapServers = "localhost:9092"
+        };
+
+        var schemaRegistryConfig = new SchemaRegistryConfig
+        {
+            Url = "http://localhost:8081"
+        };
+
+        using var schemaRegistry = new CachedSchemaRegistryClient(schemaRegistryConfig);
+        using var producer = new ProducerBuilder<string, GenericRecord>(producerConfig)
+            .SetValueSerializer(new AvroSerializer<GenericRecord>(schemaRegistry))
+            .Build();
+
+        var result = await producer.ProduceAsync("user-events", new Message<string, GenericRecord>
+        {
+            Key = "user-1",
+            Value = genericRecord
+        });
+
+        Console.WriteLine($"Message sent to {result.TopicPartitionOffset}");
+    }
+
+    public static object ConvertToAvroValue(object? value, Schema fieldSchema)
+    {
+        switch (fieldSchema.Tag)
+        {
+            case Schema.Type.Null:
+                return null!;
+
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+            case Schema.Type.Bytes:
+                return value!;
+
+            case Schema.Type.Record:
+                return ConvertToGenericRecord(value!, (RecordSchema)fieldSchema);
+
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)fieldSchema;
+                var enumerable = value as System.Collections.IEnumerable
+                    ?? throw new InvalidOperationException("Expected enumerable for array field.");
+
+                var list = new List<object>();
+                foreach (var item in enumerable)
+                {
+                    list.Add(ConvertToAvroValue(item, arraySchema.ItemSchema));
+                }
+                return list;
+
+            case Schema.Type.Map:
+                var mapSchema = (MapSchema)fieldSchema;
+                var dict = value as System.Collections.IDictionary
+                    ?? throw new InvalidOperationException("Expected dictionary for map field.");
+
+                var avroMap = new Dictionary<string, object>();
+                foreach (var key in dict.Keys)
+                {
+                    avroMap[key.ToString()!] = ConvertToAvroValue(dict[key], mapSchema.ValueSchema);
+                }
+                return avroMap;
+
+            case Schema.Type.Union:
+                var unionSchema = (UnionSchema)fieldSchema;
+                foreach (var subSchema in unionSchema.Schemas)
+                {
+                    try
+                    {
+                        return ConvertToAvroValue(value, subSchema);
+                    }
+                    catch
+                    {
+                        continue;
+                    }
+                }
+                throw new InvalidOperationException("No matching union branch for value.");
+
+            default:
+                throw new NotSupportedException($"Unsupported schema type: {fieldSchema.Tag}");
+        }
+    }
+
+    public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema schema)
+    {
+        var record = new GenericRecord(schema);
+
+        foreach (var field in schema.Fields)
+        {
+            var property = obj.GetType().GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            if (property != null)
+            {
+                var value = property.GetValue(obj);
+                record.Add(field.Name, ConvertToAvroValue(value, field.Schema));
+            }
+            else
+            {
+                throw new InvalidOperationException($"Property {field.Name} not found on {obj.GetType().Name}");
+            }
+        }
+
+        return record;
+    }
+}
+
+
+
