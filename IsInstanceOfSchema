@@ -1,0 +1,54 @@
+private static bool IsInstanceOfSchema(Schema schema, object value)
+{
+    if (schema.Tag == Schema.Type.Null)
+        return value == null;
+
+    if (value == null)
+        return false;
+
+    // Handle logical types by unwrapping them
+    if (schema is LogicalSchema logicalSchema)
+    {
+        var baseSchema = logicalSchema.BaseSchema;
+
+        // For example, timestamp-millis maps to long and DateTime
+        if ((logicalSchema.LogicalTypeName == "timestamp-millis" || logicalSchema.LogicalTypeName == "timestamp-micros")
+            && value is DateTime)
+        {
+            return baseSchema.Tag == Schema.Type.Long;
+        }
+
+        // Add more logical types if needed
+
+        // Fall back to base schema check
+        return IsInstanceOfSchema(baseSchema, value);
+    }
+
+    switch (schema.Tag)
+    {
+        case Schema.Type.Record:
+            var recordSchema = (RecordSchema)schema;
+            var type = value.GetType();
+            return recordSchema.Fields.All(f => type.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
+
+        case Schema.Type.String:
+            return value is string;
+
+        case Schema.Type.Int:
+            return value is int;
+
+        case Schema.Type.Long:
+            return value is long || value is DateTime;
+
+        case Schema.Type.Boolean:
+            return value is bool;
+
+        case Schema.Type.Array:
+            return value is IEnumerable;
+
+        // Add more cases as needed
+
+        default:
+            return false;
+    }
+}
