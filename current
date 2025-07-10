@@ -1,3 +1,12 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Avro;
+using Avro.Generic;
+using Newtonsoft.Json.Linq;
+
 public static class AvroGenericConverter
 {
     public static object? ToGenericRecord(object? obj, Schema schema)
@@ -177,6 +186,9 @@ public static class AvroGenericConverter
         if (schema is LogicalSchema logicalSchema)
             return IsMatchingSchema(logicalSchema.BaseSchema, value);
 
+        if (schema.Tag == Schema.Type.Record && value is JObject)
+            return true; // <-- FIX: JObject matches any RecordSchema
+
         switch (schema.Tag)
         {
             case Schema.Type.Record:
@@ -229,7 +241,7 @@ public static class AvroGenericConverter
                 }
                 catch
                 {
-                    // ignore
+                    // ignore and try next
                 }
             }
             throw new InvalidOperationException("No matching union schema for JToken");
