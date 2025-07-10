@@ -1,17 +1,24 @@
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
-using Avro;
-using Avro.Generic;
-
 public static class AvroGenericConverter
 {
-    // Converts arbitrary CLR object to Avro GenericRecord according to schema
     public static object? ToGenericRecord(object? obj, Schema schema)
     {
         if (obj == null) return null;
+
+        // Handle JObject explicitly
+        if (obj is JObject jObject)
+        {
+            if (schema is RecordSchema recordSchema)
+            {
+                var record = new GenericRecord(recordSchema);
+                foreach (var field in recordSchema.Fields)
+                {
+                    var token = jObject.GetValue(field.Name, StringComparison.OrdinalIgnoreCase);
+                    var fieldValue = token != null ? ConvertJTokenToAvro(token, field.Schema) : null;
+                    record.Add(field.Name, fieldValue);
+                }
+                return record;
+            }
+        }
 
         if (schema is UnionSchema unionSchema)
         {
@@ -28,15 +35,15 @@ public static class AvroGenericConverter
         {
             case Schema.Type.Record:
                 var recordSchema = (RecordSchema)schema;
-                var record = new GenericRecord(recordSchema);
+                var recordObj = new GenericRecord(recordSchema);
                 var objType = obj.GetType();
                 foreach (var field in recordSchema.Fields)
                 {
                     var prop = objType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
                     var value = prop?.GetValue(obj);
-                    record.Add(field.Name, ToGenericRecord(value, field.Schema));
+                    recordObj.Add(field.Name, ToGenericRecord(value, field.Schema));
                 }
-                return record;
+                return recordObj;
 
             case Schema.Type.Array:
                 var arraySchema = (ArraySchema)schema;
@@ -77,7 +84,6 @@ public static class AvroGenericConverter
         }
     }
 
-    // Converts Avro GenericRecord back to CLR object of type T
     public static T FromGenericRecord<T>(GenericRecord record) where T : new()
     {
         return (T)FromGenericRecord(record, typeof(T));
@@ -86,6 +92,19 @@ public static class AvroGenericConverter
     private static object? FromGenericRecord(object? value, Type targetType)
     {
         if (value == null) return null;
+
+        // Handle JObject target type
+        if (targetType == typeof(JObject) && value is GenericRecord gr)
+        {
+            var jo = new JObject();
+            foreach (var field in gr.Schema.Fields)
+            {
+                var fieldValue = gr[field.Name];
+                var fieldSchema = field.Schema;
+                jo[field.Name] = ConvertAvroValueToJToken(fieldValue, fieldSchema);
+            }
+            return jo;
+        }
 
         if (value is GenericRecord record)
         {
@@ -163,7 +182,6 @@ public static class AvroGenericConverter
             case Schema.Type.Record:
                 var recordSchema = (RecordSchema)schema;
                 var valueType = value.GetType();
-                // Match by name or properties
                 return valueType.Name.Equals(recordSchema.Name, StringComparison.OrdinalIgnoreCase) ||
                        recordSchema.Fields.All(f => valueType.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
 
@@ -194,5 +212,114 @@ public static class AvroGenericConverter
             default:
                 return false;
         }
+    }
+
+    private static object? ConvertJTokenToAvro(JToken token, Schema schema)
+    {
+        if (token.Type == JTokenType.Null)
+            return null;
+
+        if (schema is UnionSchema unionSchema)
+        {
+            foreach (var s in unionSchema.Schemas)
+            {
+                try
+                {
+                    return ConvertJTokenToAvro(token, s);
+                }
+                catch
+                {
+                    // ignore
+                }
+            }
+            throw new InvalidOperationException("No matching union schema for JToken");
+        }
+
+        if (schema is RecordSchema recordSchema)
+        {
+            var record = new GenericRecord(recordSchema);
+            foreach (var field in recordSchema.Fields)
+            {
+                var childToken = token[field.Name];
+                var val = childToken != null ? ConvertJTokenToAvro(childToken, field.Schema) : null;
+                record.Add(field.Name, val);
+            }
+            return record;
+        }
+
+        if (schema is ArraySchema arraySchema && token is JArray array)
+        {
+            return array.Select(t => ConvertJTokenToAvro(t, arraySchema.ItemSchema)).ToList();
+        }
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.String:
+                return token.ToString();
+
+            case Schema.Type.Int:
+                return token.ToObject<int>();
+
+            case Schema.Type.Long:
+                if (token.Type == JTokenType.Date)
+                {
+                    var dt = token.ToObject<DateTime>()!.ToUniversalTime();
+                    return (long)(dt - new DateTime(1970, 1, 1)).TotalMilliseconds;
+                }
+                return token.ToObject<long>();
+
+            case Schema.Type.Boolean:
+                return token.ToObject<bool>();
+
+            case Schema.Type.Float:
+                return token.ToObject<float>();
+
+            case Schema.Type.Double:
+                return token.ToObject<double>();
+
+            case Schema.Type.Null:
+                return null;
+
+            case Schema.Type.Enum:
+                return token.ToString();
+
+            default:
+                throw new NotSupportedException($"Unsupported schema type for JObject: {schema.Tag}");
+        }
+    }
+
+    private static JToken ConvertAvroValueToJToken(object? value, Schema schema)
+    {
+        if (value == null)
+            return JValue.CreateNull();
+
+        if (schema is UnionSchema unionSchema)
+        {
+            var branchSchema = unionSchema.Schemas.FirstOrDefault(s => IsMatchingSchema(s, value)) ?? unionSchema.Schemas[0];
+            return ConvertAvroValueToJToken(value, branchSchema);
+        }
+
+        if (value is GenericRecord gr)
+        {
+            var jo = new JObject();
+            foreach (var field in gr.Schema.Fields)
+            {
+                var fieldVal = gr[field.Name];
+                jo[field.Name] = ConvertAvroValueToJToken(fieldVal, field.Schema);
+            }
+            return jo;
+        }
+
+        if (schema is ArraySchema arraySchema && value is IList list)
+        {
+            var ja = new JArray();
+            foreach (var item in list)
+            {
+                ja.Add(ConvertAvroValueToJToken(item, arraySchema.ItemSchema));
+            }
+            return ja;
+        }
+
+        return new JValue(value);
     }
 }
