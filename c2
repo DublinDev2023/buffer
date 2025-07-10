@@ -1,115 +1,112 @@
 using Avro;
 using Avro.Generic;
-using Avro.IO;
 using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.IO;
+using System.Globalization;
+using System.Linq;
+using System.Reflection;
 
-class Program
+public static class AvroMapper11
 {
-    static void Main()
+    public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
     {
-        // Define schema (normally you'd load this from .avsc)
-        var schemaJson = @"
-        {
-          ""type"": ""record"",
-          ""name"": ""GenericMessage"",
-          ""fields"": [
-            { ""name"": ""Header"", ""type"": {
-                ""type"": ""record"",
-                ""name"": ""GenericHeader"",
-                ""fields"": [
-                  { ""name"": ""MessageId"", ""type"": ""string"" }
-                ]
-            }},
-            { ""name"": ""Payload"", ""type"": {
-              ""type"": ""array"",
-              ""items"": {
-                ""type"": ""record"",
-                ""name"": ""GenericPayload"",
-                ""fields"": [
-                  { ""name"": ""AppData"", ""type"": {
-                    ""type"": ""record"",
-                    ""name"": ""MyAppData"",
-                    ""fields"": [
-                      { ""name"": ""Reason"", ""type"": ""string"" }
-                    ]
-                  }}
-                ]
-              }
-            }}
-          ]
-        }";
+        return (T)MapToType(record, typeof(T));
+    }
 
-        var schema = Schema.Parse(schemaJson);
+    private static object MapToType(object avroObject, Type targetType)
+    {
+        if (avroObject == null)
+            return null;
 
-        // Original C# object
-        var message = new GenericMessage
+        if (avroObject is GenericRecord record)
         {
-            Header = new GenericHeader { MessageId = "XYZ-123" },
-            Payload = new List<GenericPayload>
+            var result = Activator.CreateInstance(targetType);
+            foreach (var field in record.Schema.Fields)
             {
-                new GenericPayload
-                {
-                    AppData = new MyAppData { Reason = "TestReason" }
-                }
+                var prop = targetType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                if (prop == null || !record.TryGetValue(field.Name, out var value))
+                    continue;
+
+                object mappedValue = MapFieldValue(value, prop.PropertyType);
+                prop.SetValue(result, mappedValue);
             }
-        };
 
-        // Build GenericRecord
-        var messageSchema = (RecordSchema)schema;
-        var headerSchema = (RecordSchema)messageSchema.GetField("Header").Schema;
-        var payloadSchema = (ArraySchema)messageSchema.GetField("Payload").Schema;
-        var payloadItemSchema = (RecordSchema)payloadSchema.ItemSchema;
-        var appDataSchema = (RecordSchema)payloadItemSchema.GetField("AppData").Schema;
-
-        var headerRecord = new GenericRecord(headerSchema);
-        headerRecord.Add("MessageId", message.Header.MessageId);
-
-        var payloadRecords = new List<GenericRecord>();
-        foreach (var payload in message.Payload)
-        {
-            var appData = (MyAppData)payload.AppData;
-
-            var appDataRecord = new GenericRecord(appDataSchema);
-            appDataRecord.Add("Reason", appData.Reason);
-
-            var payloadRecord = new GenericRecord(payloadItemSchema);
-            payloadRecord.Add("AppData", appDataRecord);
-
-            payloadRecords.Add(payloadRecord);
+            return result;
         }
 
-        var genericMessage = new GenericRecord(messageSchema);
-        genericMessage.Add("Header", headerRecord);
-        genericMessage.Add("Payload", payloadRecords);
+        return MapFieldValue(avroObject, targetType);
+    }
 
-        // Serialize to bytes
-        byte[] data;
-        using (var stream = new MemoryStream())
+    private static object MapFieldValue(object value, Type targetType)
+    {
+        if (value == null)
+            return null;
+
+        if (value is Union union)
+            value = union.Value;
+
+        if (value == null)
+            return null;
+
+        if (value is GenericRecord nestedRecord)
         {
-            var encoder = new BinaryEncoder(stream);
-            var writer = new GenericWriter<GenericRecord>(schema);
-            writer.Write(genericMessage, encoder);
-            encoder.Flush();
-            data = stream.ToArray();
+            // Dynamic type resolution from schema name
+            var schemaName = nestedRecord.Schema.Name;
+            var resolvedType = FindTypeByName(schemaName) ?? targetType;
+            return MapToType(nestedRecord, resolvedType);
         }
 
-        // Deserialize from bytes
-        GenericRecord deserializedRecord;
-        using (var stream = new MemoryStream(data))
+        if (value is IList list && IsEnumerableType(targetType, out var elementType))
         {
-            var decoder = new BinaryDecoder(stream);
-            var reader = new GenericReader<GenericRecord>(schema, schema);
-            deserializedRecord = reader.Read(null, decoder);
+            var resultList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
+            foreach (var item in list)
+                resultList.Add(MapFieldValue(item, elementType));
+
+            return targetType.IsArray
+                ? resultList.Cast<object>().ToArray()
+                : resultList;
         }
 
-        // Map to C# object
-        var result = AvroMapper.MapGenericRecordTo<GenericMessage>(deserializedRecord);
+        if (targetType.IsEnum)
+            return Enum.Parse(targetType, value.ToString());
 
-        // ✅ Confirm values
-        Console.WriteLine($"MessageId: {result.Header.MessageId}");
-        var appData = result.Payload[0].AppData as MyAppData;
-        Console.WriteLine($"AppData.Reason: {appData?.Reason}");
+        if (targetType.IsAssignableFrom(value.GetType()))
+            return value;
+
+        try
+        {
+            return Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsEnumerableType(Type type, out Type elementType)
+    {
+        if (type.IsArray)
+        {
+            elementType = type.GetElementType();
+            return true;
+        }
+
+        if (type.IsGenericType && typeof(IEnumerable).IsAssignableFrom(type))
+        {
+            elementType = type.GetGenericArguments()[0];
+            return true;
+        }
+
+        elementType = null;
+        return false;
+    }
+
+    private static Type FindTypeByName(string name)
+    {
+        return AppDomain.CurrentDomain
+            .GetAssemblies()
+            .SelectMany(a => a.GetTypes())
+            .FirstOrDefault(t => t.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
     }
 }
