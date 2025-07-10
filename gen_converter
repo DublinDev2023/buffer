@@ -6,7 +6,7 @@ using System.Reflection;
 using Avro;
 using Avro.Generic;
 
-public static class AvroConverter
+public static class AvroConverter1
 {
     // === Public API ===
 
@@ -27,8 +27,7 @@ public static class AvroConverter
 
     private static object? ConvertToAvroValue(object? value, Schema schema)
     {
-        if (value == null)
-            return null;
+        if (value == null) return null;
 
         if (schema is UnionSchema unionSchema)
         {
@@ -71,7 +70,6 @@ public static class AvroConverter
             case Schema.Type.Long:
                 if (value is DateTime dt)
                 {
-                    // Convert DateTime to Unix epoch millis
                     var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
                     return (long)(dt.ToUniversalTime() - epoch).TotalMilliseconds;
                 }
@@ -86,11 +84,11 @@ public static class AvroConverter
             case Schema.Type.Double:
                 return Convert.ToDouble(value);
 
-            case Schema.Type.Null:
-                return null;
-
             case Schema.Type.Enum:
                 return value.ToString();
+
+            case Schema.Type.Null:
+                return null;
 
             default:
                 throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
@@ -103,19 +101,18 @@ public static class AvroConverter
     {
         if (value == null) return null;
 
-        if (value is GenericRecord record)
+        if (value is GenericRecord genericRecord)
         {
             var obj = Activator.CreateInstance(targetType)!;
 
             foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
             {
-                if (!record.Schema is RecordSchema recordSchema)
-                    continue;
+                var field = genericRecord.Schema.Fields
+                    .FirstOrDefault(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
 
-                var field = recordSchema.Fields.FirstOrDefault(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
                 if (field == null) continue;
 
-                var fieldValue = record[field.Name];
+                var fieldValue = genericRecord[field.Name];
                 var propValue = ConvertFromAvroValue(fieldValue, prop.PropertyType);
                 prop.SetValue(obj, propValue);
             }
@@ -130,7 +127,6 @@ public static class AvroConverter
                 : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
 
             var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType))!;
-
             foreach (var item in (IEnumerable)value)
             {
                 list.Add(ConvertFromAvroValue(item, elementType));
@@ -146,10 +142,10 @@ public static class AvroConverter
             return list;
         }
 
-        if (targetType == typeof(DateTime) && value is long longVal)
+        if (targetType == typeof(DateTime) && value is long millis)
         {
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-            return epoch.AddMilliseconds(longVal).ToLocalTime();
+            return epoch.AddMilliseconds(millis).ToLocalTime();
         }
 
         if (targetType.IsEnum)
@@ -160,7 +156,7 @@ public static class AvroConverter
         return Convert.ChangeType(value, targetType);
     }
 
-    // === Helpers ===
+    // === Schema Matching Helpers ===
 
     private static Schema GetUnionBranchSchema(UnionSchema unionSchema, object value)
     {
@@ -181,7 +177,6 @@ public static class AvroConverter
         if (value == null)
             return false;
 
-        // Unwrap logical schema
         if (schema is LogicalSchema logicalSchema)
         {
             if ((logicalSchema.LogicalTypeName == "timestamp-millis" || logicalSchema.LogicalTypeName == "timestamp-micros")
