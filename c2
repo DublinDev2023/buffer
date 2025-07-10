@@ -6,27 +6,24 @@ using System.Reflection;
 using Avro;
 using Avro.Generic;
 
-public static class AvroGenericMapper4
+public static class AvroGenericMapper5
 {
     // Convert CLR object to Avro GenericRecord
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
         var record = new GenericRecord(schema);
-
         foreach (var field in schema.Fields)
         {
             var prop = obj.GetType().GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
             if (prop == null) continue;
 
             var value = prop.GetValue(obj);
-            var avroValue = ConvertToAvroValue(value, field.Schema); // pass full schema (may be Union)
+            var avroValue = ConvertToAvroValue(value, field.Schema);
             record.Add(field.Name, avroValue);
         }
-
         return record;
     }
 
-    // Convert CLR value to Avro-compatible value
     private static object ConvertToAvroValue(object value, Schema schema)
     {
         if (schema is UnionSchema unionSchema)
@@ -34,41 +31,77 @@ public static class AvroGenericMapper4
             if (value == null && unionSchema.Schemas.Any(s => s.Tag == Schema.Type.Null))
                 return null;
 
-            var nonNullSchema = unionSchema.Schemas.First(s => s.Tag != Schema.Type.Null);
-            return ConvertToAvroValue(value, nonNullSchema);
+            var actualSchema = unionSchema.Schemas.First(s => s.Tag != Schema.Type.Null);
+            return ConvertToAvroValue(value, actualSchema);
         }
 
         if (value == null)
-        {
-            throw new InvalidOperationException($"Value is null, but schema '{schema}' does not allow nulls.");
-        }
+            throw new InvalidOperationException($"Null value not allowed for schema '{schema.Name}'");
 
-        switch (schema)
+        switch (schema.Tag)
         {
-            case PrimitiveSchema _:
+            case Schema.Type.Null:
+                return null;
+
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+            case Schema.Type.Bytes:
                 return value;
 
-            case RecordSchema recSchema:
-                return ToGenericRecord(value, recSchema);
+            case Schema.Type.Record:
+                return ToGenericRecord(value, (RecordSchema)schema);
 
-            case ArraySchema arrSchema:
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
                 var list = new List<object>();
                 foreach (var item in (IEnumerable)value)
-                {
-                    list.Add(ConvertToAvroValue(item, arrSchema.ItemSchema));
-                }
+                    list.Add(ConvertToAvroValue(item, arraySchema.ItemSchema));
                 return list;
+
+            case Schema.Type.Enum:
+                return new GenericEnum((EnumSchema)schema, value.ToString());
+
+            case Schema.Type.Logical:
+                return ConvertLogicalToAvro(value, (LogicalSchema)schema);
 
             default:
                 throw new NotSupportedException($"Unsupported schema type for serialization: {schema.Tag}");
         }
     }
 
-    // Convert Avro GenericRecord to CLR object
+    private static object ConvertLogicalToAvro(object value, LogicalSchema logicalSchema)
+    {
+        switch (logicalSchema.LogicalTypeName)
+        {
+            case "decimal":
+                if (value is decimal dec)
+                {
+                    var scale = ((DecimalSchema)logicalSchema).Scale;
+                    var bytes = AvroDecimalHelper.DecimalToBytes(dec, scale);
+                    return bytes;
+                }
+                break;
+
+            case "timestamp-millis":
+                if (value is DateTime dt)
+                {
+                    var unixMillis = (long)(dt.ToUniversalTime() - DateTime.UnixEpoch).TotalMilliseconds;
+                    return unixMillis;
+                }
+                break;
+        }
+
+        throw new NotSupportedException($"Unsupported logical type: {logicalSchema.LogicalTypeName}");
+    }
+
+    // Convert Avro GenericRecord back to CLR object
     public static object FromGenericRecord(GenericRecord record, Type targetType)
     {
         var instance = Activator.CreateInstance(targetType);
-
         foreach (var field in record.Schema.Fields)
         {
             var prop = targetType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
@@ -78,61 +111,98 @@ public static class AvroGenericMapper4
             var clrValue = ConvertToClrValue(avroValue, prop.PropertyType, field.Schema);
             prop.SetValue(instance, clrValue);
         }
-
         return instance;
     }
 
-    // Convert Avro-compatible value to CLR type
     private static object ConvertToClrValue(object value, Type targetType, Schema schema)
     {
-        if (schema is UnionSchema unionSchema)
+        if (schema is UnionSchema union)
         {
             if (value == null) return null;
-
-            var activeSchema = unionSchema.Schemas.First(s =>
-            {
-                if (s.Tag == Schema.Type.Null) return false;
-                return true;
-            });
-
-            return ConvertToClrValue(value, targetType, activeSchema);
+            var actualSchema = union.Schemas.First(s => s.Tag != Schema.Type.Null);
+            return ConvertToClrValue(value, targetType, actualSchema);
         }
 
         if (value == null) return null;
 
-        if (schema is PrimitiveSchema)
+        switch (schema.Tag)
         {
-            return Convert.ChangeType(value, Nullable.GetUnderlyingType(targetType) ?? targetType);
-        }
+            case Schema.Type.Null:
+                return null;
 
-        if (schema is RecordSchema recSchema)
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+            case Schema.Type.Bytes:
+                return Convert.ChangeType(value, Nullable.GetUnderlyingType(targetType) ?? targetType);
+
+            case Schema.Type.Record:
+                return FromGenericRecord((GenericRecord)value, targetType);
+
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
+                var itemType = targetType.IsArray
+                    ? targetType.GetElementType()
+                    : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
+
+                var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
+                foreach (var item in (IEnumerable)value)
+                    list.Add(ConvertToClrValue(item, itemType, arraySchema.ItemSchema));
+
+                if (targetType.IsArray)
+                {
+                    var arr = Array.CreateInstance(itemType, list.Count);
+                    list.CopyTo(arr, 0);
+                    return arr;
+                }
+
+                return list;
+
+            case Schema.Type.Enum:
+                return Enum.Parse(targetType, value.ToString());
+
+            case Schema.Type.Logical:
+                return ConvertLogicalToClr(value, (LogicalSchema)schema, targetType);
+
+            default:
+                throw new NotSupportedException($"Unsupported schema type for deserialization: {schema.Tag}");
+        }
+    }
+
+    private static object ConvertLogicalToClr(object value, LogicalSchema schema, Type targetType)
+    {
+        switch (schema.LogicalTypeName)
         {
-            return FromGenericRecord((GenericRecord)value, targetType);
+            case "decimal":
+                return AvroDecimalHelper.BytesToDecimal((byte[])value, ((DecimalSchema)schema).Scale);
+            case "timestamp-millis":
+                var millis = Convert.ToInt64(value);
+                return DateTime.UnixEpoch.AddMilliseconds(millis).ToLocalTime();
+            default:
+                throw new NotSupportedException($"Logical type not supported: {schema.LogicalTypeName}");
         }
+    }
+}
 
-        if (schema is ArraySchema arraySchema)
-        {
-            var itemType = targetType.IsArray
-                ? targetType.GetElementType()
-                : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
+// OPTIONAL: Decimal conversion helper if you use logical decimal
+public static class AvroDecimalHelper
+{
+    public static byte[] DecimalToBytes(decimal value, int scale)
+    {
+        var unscaled = (BigInteger)(value * (decimal)Math.Pow(10, scale));
+        var bytes = unscaled.ToByteArray();
+        Array.Reverse(bytes);
+        return bytes;
+    }
 
-            var resultList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
-            foreach (var item in (IEnumerable)value)
-            {
-                var convertedItem = ConvertToClrValue(item, itemType, arraySchema.ItemSchema);
-                resultList.Add(convertedItem);
-            }
-
-            if (targetType.IsArray)
-            {
-                var array = Array.CreateInstance(itemType, resultList.Count);
-                resultList.CopyTo(array, 0);
-                return array;
-            }
-
-            return resultList;
-        }
-
-        throw new NotSupportedException($"Unsupported schema type for deserialization: {schema.Tag}");
+    public static decimal BytesToDecimal(byte[] bytes, int scale)
+    {
+        var copied = bytes.ToArray();
+        Array.Reverse(copied);
+        var unscaled = new System.Numerics.BigInteger(copied);
+        return (decimal)unscaled / (decimal)Math.Pow(10, scale);
     }
 }
