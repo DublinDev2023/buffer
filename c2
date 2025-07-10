@@ -1,102 +1,198 @@
+using Apache.Avro;
+using Apache.Avro.Generic;
+using Newtonsoft.Json.Linq;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Dynamic;
 using System.Linq;
 using System.Reflection;
-using Avro;
-using Avro.Generic;
 
-public static class AvroConverter21
+public static class AvroGenericConverter01
 {
+    // Entry point: object → GenericRecord
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
-        return (GenericRecord)ConvertToAvroValue(obj, schema)!;
+        var record = new GenericRecord(schema);
+        foreach (var field in schema.Fields)
+        {
+            object value = GetFieldValue(obj, field.Name);
+            record.Add(field.Name, ConvertToAvroValue(value, field.Schema));
+        }
+        return record;
     }
 
+    // Entry point: GenericRecord → object
     public static object FromGenericRecord(GenericRecord record, Type targetType)
     {
-        return ConvertFromAvroValue(record, targetType, record.Schema)!;
-    }
-
-    private static object? ConvertToAvroValue(object? value, Schema schema)
-    {
-        if (value == null) return null;
-
-        switch (schema.Tag)
+        var instance = Activator.CreateInstance(targetType);
+        foreach (var field in record.Schema.Fields)
         {
-            case Schema.Type.Record:
-                var recordSchema = (RecordSchema)schema;
-                var result = new GenericRecord(recordSchema);
-                var type = value.GetType();
-
-                foreach (var field in recordSchema.Fields)
-                {
-                    var prop = type.GetProperty(field.Name);
-                    if (prop == null) continue;
-
-                    var propValue = prop.GetValue(value);
-                    result.Add(field.Name, ConvertToAvroValue(propValue, field.Schema));
-                }
-
-                return result;
-
-            case Schema.Type.Array:
-                var arraySchema = (ArraySchema)schema;
-                var list = ((IEnumerable)value).Cast<object>().ToList();
-                return list.Select(item => ConvertToAvroValue(item, arraySchema.ItemSchema)).ToList();
-
-            case Schema.Type.Union:
-                var unionSchema = (UnionSchema)schema;
-                var actualSchema = unionSchema.Schemas.FirstOrDefault(s => s.Tag != Schema.Type.Null) ?? unionSchema.Schemas[0];
-                return ConvertToAvroValue(value, actualSchema);
-
-            default:
-                return value;
+            object value = ConvertFromAvroValue(record[field.Name], field.Schema);
+            SetFieldValue(instance, field.Name, value);
         }
+        return instance;
     }
 
-    private static object? ConvertFromAvroValue(object? value, Type targetType, Schema schema)
+    // ------------------ Serialization ------------------
+
+    private static object ConvertToAvroValue(object value, Schema schema)
     {
         if (value == null) return null;
 
         switch (schema.Tag)
         {
-            case Schema.Type.Record:
-                var record = (GenericRecord)value;
-                var instance = Activator.CreateInstance(targetType)!;
-                foreach (var field in ((RecordSchema)schema).Fields)
-                {
-                    var prop = targetType.GetProperty(field.Name);
-                    if (prop == null) continue;
+            case Schema.Type.Null:
+                return null;
 
-                    var propType = prop.PropertyType;
-                    var fieldValue = record.TryGetValue(field.Name, out var val) ? val : null;
-                    var converted = ConvertFromAvroValue(fieldValue, propType, field.Schema);
-                    prop.SetValue(instance, converted);
-                }
-                return instance;
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+                return value;
+
+            case Schema.Type.Record:
+                return ToGenericRecord(value, (RecordSchema)schema);
 
             case Schema.Type.Array:
                 var arraySchema = (ArraySchema)schema;
-                var itemType = targetType.IsArray
-                    ? targetType.GetElementType()
-                    : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
-
-                var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType))!;
+                var resultList = new List<object>();
                 foreach (var item in (IEnumerable)value)
                 {
-                    list.Add(ConvertFromAvroValue(item, itemType, arraySchema.ItemSchema));
+                    resultList.Add(ConvertToAvroValue(item, arraySchema.ItemSchema));
                 }
+                return resultList;
 
-                return list;
+            case Schema.Type.Map:
+                var mapSchema = (MapSchema)schema;
+                var resultMap = new Dictionary<string, object>();
+                var dict = value as IDictionary<string, object> ?? JObjectToDictionary(value);
+                foreach (var kv in dict)
+                {
+                    resultMap[kv.Key] = ConvertToAvroValue(kv.Value, mapSchema.ValueSchema);
+                }
+                return resultMap;
 
             case Schema.Type.Union:
                 var unionSchema = (UnionSchema)schema;
-                var nonNull = unionSchema.Schemas.FirstOrDefault(s => s.Tag != Schema.Type.Null) ?? unionSchema.Schemas[0];
-                return ConvertFromAvroValue(value, targetType, nonNull);
+                var selectedSchema = unionSchema.Schemas.FirstOrDefault(s => s.Tag != Schema.Type.Null)
+                                     ?? unionSchema.Schemas.First();
+                return ConvertToAvroValue(value, selectedSchema);
 
             default:
-                return value;
+                throw new NotSupportedException($"Unsupported Avro schema type: {schema.Tag}");
         }
+    }
+
+    // ------------------ Deserialization ------------------
+
+    private static object ConvertFromAvroValue(object value, Schema schema)
+    {
+        if (value == null) return null;
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.Null:
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+                return value;
+
+            case Schema.Type.Record:
+                var record = (GenericRecord)value;
+                var jObj = new JObject();
+                foreach (var f in record.Schema.Fields)
+                {
+                    var fieldValue = ConvertFromAvroValue(record[f.Name], f.Schema);
+                    jObj[f.Name] = JToken.FromObject(fieldValue ?? JValue.CreateNull());
+                }
+                return jObj;
+
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
+                var avroList = (IEnumerable<object>)value;
+                var jArray = new JArray();
+                foreach (var item in avroList)
+                {
+                    jArray.Add(JToken.FromObject(ConvertFromAvroValue(item, arraySchema.ItemSchema)));
+                }
+                return jArray;
+
+            case Schema.Type.Map:
+                var mapSchema = (MapSchema)schema;
+                var jMap = new JObject();
+                foreach (var kv in (IDictionary<string, object>)value)
+                {
+                    jMap[kv.Key] = JToken.FromObject(ConvertFromAvroValue(kv.Value, mapSchema.ValueSchema));
+                }
+                return jMap;
+
+            case Schema.Type.Union:
+                var unionSchema = (UnionSchema)schema;
+                var actualSchema = unionSchema.Schemas.FirstOrDefault(s => s.Tag != Schema.Type.Null)
+                                   ?? unionSchema.Schemas.First();
+                return ConvertFromAvroValue(value, actualSchema);
+
+            default:
+                throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
+        }
+    }
+
+    // ------------------ Helpers ------------------
+
+    private static object GetFieldValue(object obj, string fieldName)
+    {
+        if (obj is JObject jObj && jObj.TryGetValue(fieldName, StringComparison.OrdinalIgnoreCase, out var jVal))
+        {
+            return jVal.Type == JTokenType.Object ? jVal : jVal.ToObject<object>();
+        }
+
+        if (obj is IDictionary<string, object> dict)
+        {
+            return dict.TryGetValue(fieldName, out var val) ? val : null;
+        }
+
+        var prop = obj.GetType().GetProperty(fieldName, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
+        return prop?.GetValue(obj);
+    }
+
+    private static void SetFieldValue(object obj, string fieldName, object value)
+    {
+        var prop = obj.GetType().GetProperty(fieldName, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
+        if (prop != null && prop.CanWrite)
+        {
+            if (prop.PropertyType == typeof(JObject))
+            {
+                prop.SetValue(obj, value as JObject);
+            }
+            else if (prop.PropertyType == typeof(object) || prop.PropertyType == typeof(dynamic))
+            {
+                prop.SetValue(obj, value);
+            }
+            else
+            {
+                prop.SetValue(obj, Convert.ChangeType(value, prop.PropertyType));
+            }
+        }
+    }
+
+    private static IDictionary<string, object> JObjectToDictionary(object value)
+    {
+        if (value is JObject jObject)
+        {
+            var result = new Dictionary<string, object>();
+            foreach (var prop in jObject.Properties())
+            {
+                result[prop.Name] = prop.Value.Type == JTokenType.Object ? JObjectToDictionary(prop.Value) : prop.Value.ToObject<object>();
+            }
+            return result;
+        }
+
+        throw new ArgumentException("Expected JObject for map conversion.");
     }
 }
