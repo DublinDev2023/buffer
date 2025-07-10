@@ -1,145 +1,186 @@
-using Avro;
-using Avro.Generic;
-using Avro.Specific;
-using Avro.Util;
 using System;
 using System.Collections;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
+using Avro;
+using Avro.Generic;
 
-public static class AvroMapper7
+public static class AvroGenericMapper8
 {
-    public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
+    // Convert CLR object to Avro GenericRecord
+    public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
-        return (T)MapToType(record, typeof(T));
-    }
+        var record = new GenericRecord(schema);
 
-    private static object MapToType(object avroObject, Type targetType)
-    {
-        if (avroObject == null)
-            return null;
-
-        if (avroObject is GenericRecord record)
+        foreach (var field in schema.Fields)
         {
-            var result = Activator.CreateInstance(targetType);
-            foreach (var field in record.Schema.Fields)
-            {
-                var prop = targetType
-                    .GetProperties(BindingFlags.Instance | BindingFlags.Public)
-                    .FirstOrDefault(p => string.Equals(p.Name, field.Name, StringComparison.OrdinalIgnoreCase));
+            var prop = obj.GetType().GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            if (prop == null) continue;
 
-                if (prop == null || !record.TryGetValue(field.Name, out var value))
-                    continue;
-
-                object mappedValue = MapFieldValue(value, prop.PropertyType);
-                prop.SetValue(result, mappedValue);
-            }
-
-            return result;
+            var value = prop.GetValue(obj);
+            var avroValue = ConvertToAvroValue(value, field.Schema);
+            record.Add(field.Name, avroValue);
         }
 
-        return MapFieldValue(avroObject, targetType);
+        return record;
     }
 
-    private static object MapFieldValue(object value, Type targetType)
+    private static object ConvertToAvroValue(object value, Schema schema)
     {
-        if (value == null)
-            return null;
+        if (schema is UnionSchema unionSchema)
+        {
+            if (value == null && unionSchema.Schemas.Any(s => s.Tag == Schema.Type.Null))
+                return null;
 
-        // Handle Avro union type
-        if (value is Union union)
-            value = union.Value;
+            var actualSchema = unionSchema.Schemas.First(s => s.Tag != Schema.Type.Null);
+            return ConvertToAvroValue(value, actualSchema);
+        }
 
         if (value == null)
-            return null;
+            throw new InvalidOperationException($"Null value not allowed for schema '{schema.Name}'");
 
-        // Handle logical values
-        if (value is DateTime dt && targetType == typeof(DateTime))
-            return dt;
-
-        if (value is decimal dec && targetType == typeof(decimal))
-            return dec;
-
-        if (value is string str && targetType == typeof(Guid))
-            return Guid.Parse(str);
-
-        if (value is GenericRecord nestedRecord)
+        switch (schema.Tag)
         {
-            return MapToType(nestedRecord, targetType);
-        }
+            case Schema.Type.Null:
+                return null;
 
-        // Handle arrays and lists
-        if (value is IList avroList && IsEnumerableType(targetType, out var elementType))
-        {
-            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
-            foreach (var item in avroList)
-            {
-                var mappedItem = MapFieldValue(item, elementType);
-                list.Add(mappedItem);
-            }
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+            case Schema.Type.Bytes:
+                return value;
 
-            if (targetType.IsArray)
-            {
-                var array = Array.CreateInstance(elementType, list.Count);
-                list.CopyTo(array, 0);
-                return array;
-            }
+            case Schema.Type.Record:
+                return ToGenericRecord(value, (RecordSchema)schema);
 
-            return list;
-        }
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
+                var list = new List<object>();
+                foreach (var item in (IEnumerable)value)
+                    list.Add(ConvertToAvroValue(item, arraySchema.ItemSchema));
+                return list;
 
-        // Handle enums
-        if (targetType.IsEnum)
-        {
-            return Enum.Parse(targetType, value.ToString());
-        }
+            case Schema.Type.Enum:
+                return new GenericEnum((EnumSchema)schema, value.ToString());
 
-        // Directly assignable
-        if (targetType.IsAssignableFrom(value.GetType()))
-        {
-            return value;
-        }
+            case Schema.Type.Logical:
+                return ConvertLogicalToAvro(value, (LogicalSchema)schema);
 
-        // Fallback convert
-        try
-        {
-            return Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
-        }
-        catch
-        {
-            return null;
+            default:
+                throw new NotSupportedException($"Unsupported schema type for serialization: {schema.Tag}");
         }
     }
 
-    private static bool IsEnumerableType(Type type, out Type elementType)
+    private static object ConvertLogicalToAvro(object value, LogicalSchema logicalSchema)
     {
-        if (type.IsArray)
+        switch (logicalSchema.LogicalTypeName)
         {
-            elementType = type.GetElementType();
-            return true;
+            case "timestamp-millis":
+                if (value is DateTime dt)
+                {
+                    var utc = dt.Kind == DateTimeKind.Unspecified
+                        ? DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+                        : dt.ToUniversalTime();
+                    return (long)(utc - DateTime.UnixEpoch).TotalMilliseconds;
+                }
+                throw new InvalidCastException("Expected DateTime for timestamp-millis");
+
+            default:
+                throw new NotSupportedException($"Unsupported logical type: {logicalSchema.LogicalTypeName}");
+        }
+    }
+
+    // Convert Avro GenericRecord to CLR object
+    public static object FromGenericRecord(GenericRecord record, Type targetType)
+    {
+        var instance = Activator.CreateInstance(targetType);
+
+        foreach (var field in record.Schema.Fields)
+        {
+            var prop = targetType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            if (prop == null || !prop.CanWrite) continue;
+
+            var avroValue = record[field.Name];
+            var clrValue = ConvertToClrValue(avroValue, prop.PropertyType, field.Schema);
+            prop.SetValue(instance, clrValue);
         }
 
-        if (type.IsGenericType &&
-            (type.GetGenericTypeDefinition() == typeof(IEnumerable<>) ||
-             type.GetGenericTypeDefinition() == typeof(List<>) ||
-             type.GetGenericTypeDefinition() == typeof(IList<>)))
+        return instance;
+    }
+
+    private static object ConvertToClrValue(object value, Type targetType, Schema schema)
+    {
+        if (schema is UnionSchema union)
         {
-            elementType = type.GetGenericArguments()[0];
-            return true;
+            if (value == null) return null;
+            var actualSchema = union.Schemas.First(s => s.Tag != Schema.Type.Null);
+            return ConvertToClrValue(value, targetType, actualSchema);
         }
 
-        var iface = type.GetInterfaces()
-            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+        if (value == null) return null;
 
-        if (iface != null)
+        switch (schema.Tag)
         {
-            elementType = iface.GetGenericArguments()[0];
-            return true;
-        }
+            case Schema.Type.Null:
+                return null;
 
-        elementType = null;
-        return false;
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+            case Schema.Type.Bytes:
+                return Convert.ChangeType(value, Nullable.GetUnderlyingType(targetType) ?? targetType);
+
+            case Schema.Type.Record:
+                return FromGenericRecord((GenericRecord)value, targetType);
+
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
+                var itemType = targetType.IsArray
+                    ? targetType.GetElementType()
+                    : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
+
+                var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
+                foreach (var item in (IEnumerable)value)
+                    list.Add(ConvertToClrValue(item, itemType, arraySchema.ItemSchema));
+
+                if (targetType.IsArray)
+                {
+                    var arr = Array.CreateInstance(itemType, list.Count);
+                    list.CopyTo(arr, 0);
+                    return arr;
+                }
+
+                return list;
+
+            case Schema.Type.Enum:
+                return Enum.Parse(targetType, value.ToString());
+
+            case Schema.Type.Logical:
+                return ConvertLogicalToClr(value, (LogicalSchema)schema, targetType);
+
+            default:
+                throw new NotSupportedException($"Unsupported schema type for deserialization: {schema.Tag}");
+        }
+    }
+
+    private static object ConvertLogicalToClr(object value, LogicalSchema schema, Type targetType)
+    {
+        switch (schema.LogicalTypeName)
+        {
+            case "timestamp-millis":
+                var millis = Convert.ToInt64(value);
+                return DateTime.UnixEpoch.AddMilliseconds(millis).ToLocalTime();
+
+            default:
+                throw new NotSupportedException($"Logical type not supported: {schema.LogicalTypeName}");
+        }
     }
 }
