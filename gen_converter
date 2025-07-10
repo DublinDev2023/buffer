@@ -8,7 +8,8 @@ using Avro.Generic;
 
 public static class AvroConverter
 {
-    // Public API: Convert any object to GenericRecord given the Avro schema
+    // === Public API ===
+
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
         if (obj == null) throw new ArgumentNullException(nameof(obj));
@@ -16,25 +17,32 @@ public static class AvroConverter
         return (GenericRecord)ConvertToAvroValue(obj, schema)!;
     }
 
-    // Public API: Convert GenericRecord back to CLR object of type T
     public static T FromGenericRecord<T>(GenericRecord record) where T : new()
     {
         if (record == null) throw new ArgumentNullException(nameof(record));
         return (T)ConvertFromAvroValue(record, typeof(T))!;
     }
 
-    // --- Internal recursive converter to Avro-compatible object (GenericRecord, list, primitive, etc.)
+    // === Serialization ===
+
     private static object? ConvertToAvroValue(object? value, Schema schema)
     {
-        if (value == null) return null;
+        if (value == null)
+            return null;
+
+        if (schema is UnionSchema unionSchema)
+        {
+            var branchSchema = GetUnionBranchSchema(unionSchema, value);
+            return ConvertToAvroValue(value, branchSchema);
+        }
+
+        if (schema is LogicalSchema logicalSchema)
+        {
+            return ConvertToAvroValue(value, logicalSchema.BaseSchema);
+        }
 
         switch (schema.Tag)
         {
-            case Schema.Type.Union:
-                var unionSchema = (UnionSchema)schema;
-                var actualSchema = GetUnionBranchSchema(unionSchema, value);
-                return ConvertToAvroValue(value, actualSchema);
-
             case Schema.Type.Record:
                 var recordSchema = (RecordSchema)schema;
                 var record = new GenericRecord(recordSchema);
@@ -43,9 +51,10 @@ public static class AvroConverter
                 foreach (var field in recordSchema.Fields)
                 {
                     var prop = type.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-                    var propValue = prop?.GetValue(value);
-                    record.Add(field.Name, ConvertToAvroValue(propValue, field.Schema));
+                    var fieldValue = prop?.GetValue(value);
+                    record.Add(field.Name, ConvertToAvroValue(fieldValue, field.Schema));
                 }
+
                 return record;
 
             case Schema.Type.Array:
@@ -53,7 +62,6 @@ public static class AvroConverter
                 var list = ((IEnumerable)value).Cast<object>().ToList();
                 return list.Select(item => ConvertToAvroValue(item, arraySchema.ItemSchema)).ToList();
 
-            // Handle primitive types and logical types (like DateTime)
             case Schema.Type.String:
                 return value.ToString();
 
@@ -63,7 +71,7 @@ public static class AvroConverter
             case Schema.Type.Long:
                 if (value is DateTime dt)
                 {
-                    // Convert DateTime to unix epoch millis (example for timestamp-millis)
+                    // Convert DateTime to Unix epoch millis
                     var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
                     return (long)(dt.ToUniversalTime() - epoch).TotalMilliseconds;
                 }
@@ -81,41 +89,48 @@ public static class AvroConverter
             case Schema.Type.Null:
                 return null;
 
+            case Schema.Type.Enum:
+                return value.ToString();
+
             default:
-                // For fixed, enum, bytes, etc. add handling as needed
-                return value;
+                throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
         }
     }
 
-    // --- Internal recursive converter from GenericRecord/Avro value to CLR object
+    // === Deserialization ===
+
     private static object? ConvertFromAvroValue(object? value, Type targetType)
     {
         if (value == null) return null;
 
-        if (typeof(GenericRecord).IsAssignableFrom(value.GetType()))
+        if (value is GenericRecord record)
         {
-            var record = (GenericRecord)value;
             var obj = Activator.CreateInstance(targetType)!;
 
             foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
             {
-                if (!record.Schema.Fields.Any(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase)))
+                if (!record.Schema is RecordSchema recordSchema)
                     continue;
 
-                var field = record.Schema.Fields.First(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                var field = recordSchema.Fields.FirstOrDefault(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                if (field == null) continue;
+
                 var fieldValue = record[field.Name];
                 var propValue = ConvertFromAvroValue(fieldValue, prop.PropertyType);
                 prop.SetValue(obj, propValue);
             }
+
             return obj;
         }
-        else if (typeof(IEnumerable).IsAssignableFrom(targetType) && targetType != typeof(string))
+
+        if (typeof(IEnumerable).IsAssignableFrom(targetType) && targetType != typeof(string))
         {
             var elementType = targetType.IsArray
                 ? targetType.GetElementType()
                 : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
 
             var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType))!;
+
             foreach (var item in (IEnumerable)value)
             {
                 list.Add(ConvertFromAvroValue(item, elementType));
@@ -127,25 +142,26 @@ public static class AvroConverter
                 list.CopyTo(array, 0);
                 return array;
             }
-            else
-            {
-                return list;
-            }
+
+            return list;
         }
-        else if (targetType == typeof(DateTime) && value is long longVal)
+
+        if (targetType == typeof(DateTime) && value is long longVal)
         {
-            // Assuming timestamp-millis logical type
             var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
             return epoch.AddMilliseconds(longVal).ToLocalTime();
         }
-        else
+
+        if (targetType.IsEnum)
         {
-            // Primitive cast
-            return Convert.ChangeType(value, targetType);
+            return Enum.Parse(targetType, value.ToString()!);
         }
+
+        return Convert.ChangeType(value, targetType);
     }
 
-    // --- Helper to pick correct union branch schema based on runtime value shape
+    // === Helpers ===
+
     private static Schema GetUnionBranchSchema(UnionSchema unionSchema, object value)
     {
         foreach (var schema in unionSchema.Schemas)
@@ -157,16 +173,15 @@ public static class AvroConverter
         throw new InvalidOperationException($"No matching schema found in union for value of type {value.GetType().FullName}");
     }
 
-    // --- Heuristic to detect if value matches schema, by shape and type
     private static bool IsInstanceOfSchema(Schema schema, object value)
     {
-        if (schema.Tag == Schema.Type.Null)
-            return value == null;
+        if (schema.Tag == Schema.Type.Null && value == null)
+            return true;
 
         if (value == null)
             return false;
 
-        // Handle logical schema (e.g., timestamp-millis)
+        // Unwrap logical schema
         if (schema is LogicalSchema logicalSchema)
         {
             if ((logicalSchema.LogicalTypeName == "timestamp-millis" || logicalSchema.LogicalTypeName == "timestamp-micros")
@@ -175,7 +190,6 @@ public static class AvroConverter
                 return true;
             }
 
-            // Fall back to checking the base schema
             return IsInstanceOfSchema(logicalSchema.BaseSchema, value);
         }
 
@@ -184,7 +198,6 @@ public static class AvroConverter
             case Schema.Type.Record:
                 var recordSchema = (RecordSchema)schema;
                 var type = value.GetType();
-                // Match by shape — not type name
                 return recordSchema.Fields.All(f =>
                     type.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
 
@@ -195,7 +208,7 @@ public static class AvroConverter
                 return value is int;
 
             case Schema.Type.Long:
-                return value is long || value is DateTime; // allow DateTime here
+                return value is long || value is DateTime;
 
             case Schema.Type.Boolean:
                 return value is bool;
@@ -206,11 +219,11 @@ public static class AvroConverter
             case Schema.Type.Double:
                 return value is double;
 
-            case Schema.Type.Array:
-                return value is IEnumerable;
-
             case Schema.Type.Enum:
                 return value.GetType().IsEnum;
+
+            case Schema.Type.Array:
+                return value is IEnumerable;
 
             default:
                 return false;
