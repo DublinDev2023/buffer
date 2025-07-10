@@ -2,16 +2,18 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Numerics;
 using System.Reflection;
 using Avro;
 using Avro.Generic;
 
-public static class AvroGenericMapper5
+public static class AvroGenericMapper6
 {
     // Convert CLR object to Avro GenericRecord
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
         var record = new GenericRecord(schema);
+
         foreach (var field in schema.Fields)
         {
             var prop = obj.GetType().GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
@@ -21,6 +23,7 @@ public static class AvroGenericMapper5
             var avroValue = ConvertToAvroValue(value, field.Schema);
             record.Add(field.Name, avroValue);
         }
+
         return record;
     }
 
@@ -77,132 +80,25 @@ public static class AvroGenericMapper5
     {
         switch (logicalSchema.LogicalTypeName)
         {
-            case "decimal":
-                if (value is decimal dec)
-                {
-                    var scale = ((DecimalSchema)logicalSchema).Scale;
-                    var bytes = AvroDecimalHelper.DecimalToBytes(dec, scale);
-                    return bytes;
-                }
-                break;
-
             case "timestamp-millis":
                 if (value is DateTime dt)
                 {
-                    var unixMillis = (long)(dt.ToUniversalTime() - DateTime.UnixEpoch).TotalMilliseconds;
-                    return unixMillis;
+                    var utc = dt.Kind == DateTimeKind.Unspecified
+                        ? DateTime.SpecifyKind(dt, DateTimeKind.Utc)
+                        : dt.ToUniversalTime();
+                    return (long)(utc - DateTime.UnixEpoch).TotalMilliseconds;
                 }
-                break;
-        }
+                throw new InvalidCastException("Expected DateTime for timestamp-millis");
 
-        throw new NotSupportedException($"Unsupported logical type: {logicalSchema.LogicalTypeName}");
+            default:
+                throw new NotSupportedException($"Unsupported logical type: {logicalSchema.LogicalTypeName}");
+        }
     }
 
-    // Convert Avro GenericRecord back to CLR object
+    // Convert Avro GenericRecord to CLR object
     public static object FromGenericRecord(GenericRecord record, Type targetType)
     {
         var instance = Activator.CreateInstance(targetType);
+
         foreach (var field in record.Schema.Fields)
         {
-            var prop = targetType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-            if (prop == null || !prop.CanWrite) continue;
-
-            var avroValue = record[field.Name];
-            var clrValue = ConvertToClrValue(avroValue, prop.PropertyType, field.Schema);
-            prop.SetValue(instance, clrValue);
-        }
-        return instance;
-    }
-
-    private static object ConvertToClrValue(object value, Type targetType, Schema schema)
-    {
-        if (schema is UnionSchema union)
-        {
-            if (value == null) return null;
-            var actualSchema = union.Schemas.First(s => s.Tag != Schema.Type.Null);
-            return ConvertToClrValue(value, targetType, actualSchema);
-        }
-
-        if (value == null) return null;
-
-        switch (schema.Tag)
-        {
-            case Schema.Type.Null:
-                return null;
-
-            case Schema.Type.Boolean:
-            case Schema.Type.Int:
-            case Schema.Type.Long:
-            case Schema.Type.Float:
-            case Schema.Type.Double:
-            case Schema.Type.String:
-            case Schema.Type.Bytes:
-                return Convert.ChangeType(value, Nullable.GetUnderlyingType(targetType) ?? targetType);
-
-            case Schema.Type.Record:
-                return FromGenericRecord((GenericRecord)value, targetType);
-
-            case Schema.Type.Array:
-                var arraySchema = (ArraySchema)schema;
-                var itemType = targetType.IsArray
-                    ? targetType.GetElementType()
-                    : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
-
-                var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
-                foreach (var item in (IEnumerable)value)
-                    list.Add(ConvertToClrValue(item, itemType, arraySchema.ItemSchema));
-
-                if (targetType.IsArray)
-                {
-                    var arr = Array.CreateInstance(itemType, list.Count);
-                    list.CopyTo(arr, 0);
-                    return arr;
-                }
-
-                return list;
-
-            case Schema.Type.Enum:
-                return Enum.Parse(targetType, value.ToString());
-
-            case Schema.Type.Logical:
-                return ConvertLogicalToClr(value, (LogicalSchema)schema, targetType);
-
-            default:
-                throw new NotSupportedException($"Unsupported schema type for deserialization: {schema.Tag}");
-        }
-    }
-
-    private static object ConvertLogicalToClr(object value, LogicalSchema schema, Type targetType)
-    {
-        switch (schema.LogicalTypeName)
-        {
-            case "decimal":
-                return AvroDecimalHelper.BytesToDecimal((byte[])value, ((DecimalSchema)schema).Scale);
-            case "timestamp-millis":
-                var millis = Convert.ToInt64(value);
-                return DateTime.UnixEpoch.AddMilliseconds(millis).ToLocalTime();
-            default:
-                throw new NotSupportedException($"Logical type not supported: {schema.LogicalTypeName}");
-        }
-    }
-}
-
-// OPTIONAL: Decimal conversion helper if you use logical decimal
-public static class AvroDecimalHelper
-{
-    public static byte[] DecimalToBytes(decimal value, int scale)
-    {
-        var unscaled = (BigInteger)(value * (decimal)Math.Pow(10, scale));
-        var bytes = unscaled.ToByteArray();
-        Array.Reverse(bytes);
-        return bytes;
-    }
-
-    public static decimal BytesToDecimal(byte[] bytes, int scale)
-    {
-        var copied = bytes.ToArray();
-        Array.Reverse(copied);
-        var unscaled = new System.Numerics.BigInteger(copied);
-        return (decimal)unscaled / (decimal)Math.Pow(10, scale);
-    }
-}
