@@ -8,7 +8,7 @@ using Avro.Generic;
 
 public static class AvroGenericMapper
 {
-    // Convert C# object to GenericRecord
+    // Convert CLR object to GenericRecord
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
         var record = new GenericRecord(schema);
@@ -63,7 +63,7 @@ public static class AvroGenericMapper
         }
     }
 
-    // Convert GenericRecord back to C# object
+    // Convert GenericRecord back to CLR object
     public static object FromGenericRecord(GenericRecord record, Type targetType)
     {
         var instance = Activator.CreateInstance(targetType);
@@ -112,7 +112,6 @@ public static class AvroGenericMapper
                 resultList.Add(converted);
             }
 
-            // Handle List<T> or T[]
             if (targetType.IsArray)
             {
                 var array = Array.CreateInstance(itemType, resultList.Count);
