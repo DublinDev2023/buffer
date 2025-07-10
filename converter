@@ -166,6 +166,10 @@ class Program
 -- map back
 
 using Avro.Generic;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
 using System.Reflection;
 
 public static class AvroMapper
@@ -177,10 +181,12 @@ public static class AvroMapper
 
     private static object MapToType(object avroObject, Type targetType)
     {
+        if (avroObject is null)
+            return null;
+
         if (avroObject is GenericRecord record)
         {
             var result = Activator.CreateInstance(targetType);
-
             foreach (var field in record.Schema.Fields)
             {
                 var prop = targetType.GetProperty(field.Name, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
@@ -188,33 +194,79 @@ public static class AvroMapper
 
                 if (!record.TryGetValue(field.Name, out var value) || value == null) continue;
 
-                var propType = prop.PropertyType;
+                object mappedValue = null;
 
                 if (value is GenericRecord nestedRecord)
                 {
-                    // Recursively map nested records
-                    var nestedValue = MapToType(nestedRecord, propType);
-                    prop.SetValue(result, nestedValue);
+                    mappedValue = MapToType(nestedRecord, prop.PropertyType);
                 }
-                else if (propType.IsEnum)
+                else if (value is IList avroList && IsCollectionType(prop.PropertyType, out var elementType))
                 {
-                    prop.SetValue(result, Enum.Parse(propType, value.ToString()));
+                    var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
+                    foreach (var item in avroList)
+                    {
+                        list.Add(MapToType(item, elementType));
+                    }
+                    mappedValue = list;
                 }
-                else if (value != null && propType != value.GetType())
+                else if (prop.PropertyType.IsEnum)
                 {
-                    prop.SetValue(result, Convert.ChangeType(value, propType));
+                    mappedValue = Enum.Parse(prop.PropertyType, value.ToString());
+                }
+                else if (prop.PropertyType.IsAssignableFrom(value.GetType()))
+                {
+                    mappedValue = value;
                 }
                 else
                 {
-                    prop.SetValue(result, value);
+                    try
+                    {
+                        mappedValue = Convert.ChangeType(value, prop.PropertyType);
+                    }
+                    catch
+                    {
+                        // Conversion failed, skip this property
+                        continue;
+                    }
                 }
+
+                prop.SetValue(result, mappedValue);
             }
 
             return result;
         }
 
-        return avroObject;
+        // Primitive or value types (or enum)
+        if (targetType.IsEnum)
+            return Enum.Parse(targetType, avroObject.ToString());
+
+        if (targetType.IsAssignableFrom(avroObject.GetType()))
+            return avroObject;
+
+        try
+        {
+            return Convert.ChangeType(avroObject, targetType);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool IsCollectionType(Type type, out Type elementType)
+    {
+        elementType = null;
+        if (!type.IsGenericType) return false;
+
+        var genericDef = type.GetGenericTypeDefinition();
+        if (genericDef == typeof(IEnumerable<>) || 
+            genericDef == typeof(IList<>) || 
+            genericDef == typeof(List<>))
+        {
+            elementType = type.GetGenericArguments()[0];
+            return true;
+        }
+
+        return false;
     }
 }
-
-
