@@ -1,40 +1,19 @@
- public static RecordSchema CreateSchema(Type type, string recordName = null)
+using Avro.Generic;
+using Avro;
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+
+public static class ConfluentAvroConverter
+{
+    public static string GenerateSchema(Type type, string namespaceName = "example.avro")
     {
-        recordName ??= type.Name;
-        var fields = new List<Field>();
-
-        foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
-        {
-            var schema = GetSchemaForType(prop.PropertyType, prop.Name);
-            fields.Add(new Field(schema, prop.Name, null, null));
-        }
-
-        return new RecordSchema(recordName, null, new List<string>(), fields);
+        return GenerateSchemaInternal(type, namespaceName);
     }
 
-    private static Schema GetSchemaForType(Type type, string nameHint = null)
-    {
-        if (type == typeof(string)) return Schema.Parse("\"string\"");
-        if (type == typeof(int)) return Schema.Parse("\"int\"");
-        if (type == typeof(long)) return Schema.Parse("\"long\"");
-        if (type == typeof(bool)) return Schema.Parse("\"boolean\"");
-        if (type == typeof(float)) return Schema.Parse("\"float\"");
-        if (type == typeof(double)) return Schema.Parse("\"double\"");
-        if (type == typeof(byte[])) return Schema.Parse("\"bytes\"");
-        if (type.IsEnum) return Schema.Parse("\"string\""); // serialize enums as strings
-
-        if (typeof(IEnumerable).IsAssignableFrom(type) && type != typeof(string))
-        {
-            var elemType = type.IsArray ? type.GetElementType() : type.GetGenericArguments()[0];
-            var itemSchema = GetSchemaForType(elemType);
-            return new ArraySchema(itemSchema);
-        }
-
-        // Fallback for nested objects
-        return CreateSchema(type, nameHint ?? type.Name);
-    }
-
-    public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
+    public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema schema)
     {
         var record = new GenericRecord(schema);
 
@@ -44,9 +23,8 @@
             if (prop == null) continue;
 
             var value = prop.GetValue(obj);
-            var fieldSchema = field.Schema;
-
-            record.Add(field.Name, ConvertValue(value, fieldSchema));
+            var converted = ConvertValue(value, field.Schema);
+            record.Add(field.Name, converted);
         }
 
         return record;
@@ -58,6 +36,7 @@
 
         switch (schema.Tag)
         {
+            case Schema.Type.Null:
             case Schema.Type.Boolean:
             case Schema.Type.Int:
             case Schema.Type.Long:
@@ -67,19 +46,57 @@
             case Schema.Type.Bytes:
                 return value;
 
+            case Schema.Type.Record:
+                return ConvertToGenericRecord(value, (RecordSchema)schema);
+
             case Schema.Type.Array:
-                var arrSchema = (ArraySchema)schema;
+                var arraySchema = (ArraySchema)schema;
                 var list = new List<object>();
                 foreach (var item in (IEnumerable)value)
                 {
-                    list.Add(ConvertValue(item, arrSchema.ItemSchema));
+                    list.Add(ConvertValue(item, arraySchema.ItemSchema));
                 }
                 return list;
 
-            case Schema.Type.Record:
-                var recSchema = (RecordSchema)schema;
-                return ToGenericRecord(value, recSchema);
+            case Schema.Type.Union:
+                var unionSchema = (UnionSchema)schema;
+                var actualSchema = unionSchema.Schemas.First(s => s.Tag != Schema.Type.Null);
+                return ConvertValue(value, actualSchema);
+
+            default:
+                throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
+        }
+    }
+
+    private static string GenerateSchemaInternal(Type type, string ns)
+    {
+        if (type == typeof(string)) return "\"string\"";
+        if (type == typeof(int)) return "\"int\"";
+        if (type == typeof(long)) return "\"long\"";
+        if (type == typeof(bool)) return "\"boolean\"";
+        if (type == typeof(float)) return "\"float\"";
+        if (type == typeof(double)) return "\"double\"";
+        if (type == typeof(byte[])) return "\"bytes\"";
+
+        if (typeof(IEnumerable).IsAssignableFrom(type) && type != typeof(string))
+        {
+            Type itemType = type.IsArray ? type.GetElementType() : type.GetGenericArguments().FirstOrDefault();
+            return $"{{\"type\":\"array\", \"items\":{GenerateSchemaInternal(itemType, ns)}}}";
         }
 
-        throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
+        // Complex object
+        var fields = type.GetProperties()
+            .Select(p =>
+            {
+                var fieldType = GenerateSchemaInternal(p.PropertyType, ns);
+                return $"{{\"name\": \"{p.Name}\", \"type\": {fieldType}}}";
+            });
+
+        return $@"{{
+            ""type"": ""record"",
+            ""name"": ""{type.Name}"",
+            ""namespace"": ""{ns}"",
+            ""fields"": [{string.Join(",", fields)}]
+        }}";
     }
+}
