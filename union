@@ -43,3 +43,10 @@ private static bool IsInstanceOfSchema(Schema schema, object value)
             return false;
     }
 }
+
+
+//
+case Schema.Type.Union:
+    var unionSchema = (UnionSchema)schema;
+    var actualSchema = GetUnionBranchSchema(unionSchema, value);
+    return ConvertToAvroValue(value, actualSchema);
