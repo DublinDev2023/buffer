@@ -1,0 +1,34 @@
+private static object? ConvertToAvroValue(object? value, Schema schema)
+{
+    if (value == null) return null;
+
+    switch (schema.Tag)
+    {
+        case Schema.Type.Union:
+            var unionSchema = (UnionSchema)schema;
+            // Correctly pick the schema branch matching the runtime value
+            var actualSchema = unionSchema.GetSchema(value);
+            return ConvertToAvroValue(value, actualSchema);
+
+        case Schema.Type.Record:
+            var recordSchema = (RecordSchema)schema;
+            var record = new GenericRecord(recordSchema);
+            var type = value.GetType();
+
+            foreach (var field in recordSchema.Fields)
+            {
+                var prop = type.GetProperty(field.Name);
+                var propValue = prop?.GetValue(value);
+                record.Add(field.Name, ConvertToAvroValue(propValue, field.Schema));
+            }
+            return record;
+
+        case Schema.Type.Array:
+            var arraySchema = (ArraySchema)schema;
+            var list = ((IEnumerable)value).Cast<object>().ToList();
+            return list.Select(item => ConvertToAvroValue(item, arraySchema.ItemSchema)).ToList();
+
+        default:
+            return value;
+    }
+}
