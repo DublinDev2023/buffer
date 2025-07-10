@@ -1,104 +1,145 @@
+using Avro;
+using Avro.Generic;
+using Avro.Specific;
+using Avro.Util;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
-using System.Numerics;
 using System.Reflection;
-using Avro;
-using Avro.Generic;
 
-public static class AvroGenericMapper6
+public static class AvroMapper7
 {
-    // Convert CLR object to Avro GenericRecord
-    public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
+    public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
     {
-        var record = new GenericRecord(schema);
-
-        foreach (var field in schema.Fields)
-        {
-            var prop = obj.GetType().GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-            if (prop == null) continue;
-
-            var value = prop.GetValue(obj);
-            var avroValue = ConvertToAvroValue(value, field.Schema);
-            record.Add(field.Name, avroValue);
-        }
-
-        return record;
+        return (T)MapToType(record, typeof(T));
     }
 
-    private static object ConvertToAvroValue(object value, Schema schema)
+    private static object MapToType(object avroObject, Type targetType)
     {
-        if (schema is UnionSchema unionSchema)
-        {
-            if (value == null && unionSchema.Schemas.Any(s => s.Tag == Schema.Type.Null))
-                return null;
+        if (avroObject == null)
+            return null;
 
-            var actualSchema = unionSchema.Schemas.First(s => s.Tag != Schema.Type.Null);
-            return ConvertToAvroValue(value, actualSchema);
+        if (avroObject is GenericRecord record)
+        {
+            var result = Activator.CreateInstance(targetType);
+            foreach (var field in record.Schema.Fields)
+            {
+                var prop = targetType
+                    .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                    .FirstOrDefault(p => string.Equals(p.Name, field.Name, StringComparison.OrdinalIgnoreCase));
+
+                if (prop == null || !record.TryGetValue(field.Name, out var value))
+                    continue;
+
+                object mappedValue = MapFieldValue(value, prop.PropertyType);
+                prop.SetValue(result, mappedValue);
+            }
+
+            return result;
         }
+
+        return MapFieldValue(avroObject, targetType);
+    }
+
+    private static object MapFieldValue(object value, Type targetType)
+    {
+        if (value == null)
+            return null;
+
+        // Handle Avro union type
+        if (value is Union union)
+            value = union.Value;
 
         if (value == null)
-            throw new InvalidOperationException($"Null value not allowed for schema '{schema.Name}'");
+            return null;
 
-        switch (schema.Tag)
+        // Handle logical values
+        if (value is DateTime dt && targetType == typeof(DateTime))
+            return dt;
+
+        if (value is decimal dec && targetType == typeof(decimal))
+            return dec;
+
+        if (value is string str && targetType == typeof(Guid))
+            return Guid.Parse(str);
+
+        if (value is GenericRecord nestedRecord)
         {
-            case Schema.Type.Null:
-                return null;
+            return MapToType(nestedRecord, targetType);
+        }
 
-            case Schema.Type.Boolean:
-            case Schema.Type.Int:
-            case Schema.Type.Long:
-            case Schema.Type.Float:
-            case Schema.Type.Double:
-            case Schema.Type.String:
-            case Schema.Type.Bytes:
-                return value;
+        // Handle arrays and lists
+        if (value is IList avroList && IsEnumerableType(targetType, out var elementType))
+        {
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
+            foreach (var item in avroList)
+            {
+                var mappedItem = MapFieldValue(item, elementType);
+                list.Add(mappedItem);
+            }
 
-            case Schema.Type.Record:
-                return ToGenericRecord(value, (RecordSchema)schema);
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(elementType, list.Count);
+                list.CopyTo(array, 0);
+                return array;
+            }
 
-            case Schema.Type.Array:
-                var arraySchema = (ArraySchema)schema;
-                var list = new List<object>();
-                foreach (var item in (IEnumerable)value)
-                    list.Add(ConvertToAvroValue(item, arraySchema.ItemSchema));
-                return list;
+            return list;
+        }
 
-            case Schema.Type.Enum:
-                return new GenericEnum((EnumSchema)schema, value.ToString());
+        // Handle enums
+        if (targetType.IsEnum)
+        {
+            return Enum.Parse(targetType, value.ToString());
+        }
 
-            case Schema.Type.Logical:
-                return ConvertLogicalToAvro(value, (LogicalSchema)schema);
+        // Directly assignable
+        if (targetType.IsAssignableFrom(value.GetType()))
+        {
+            return value;
+        }
 
-            default:
-                throw new NotSupportedException($"Unsupported schema type for serialization: {schema.Tag}");
+        // Fallback convert
+        try
+        {
+            return Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            return null;
         }
     }
 
-    private static object ConvertLogicalToAvro(object value, LogicalSchema logicalSchema)
+    private static bool IsEnumerableType(Type type, out Type elementType)
     {
-        switch (logicalSchema.LogicalTypeName)
+        if (type.IsArray)
         {
-            case "timestamp-millis":
-                if (value is DateTime dt)
-                {
-                    var utc = dt.Kind == DateTimeKind.Unspecified
-                        ? DateTime.SpecifyKind(dt, DateTimeKind.Utc)
-                        : dt.ToUniversalTime();
-                    return (long)(utc - DateTime.UnixEpoch).TotalMilliseconds;
-                }
-                throw new InvalidCastException("Expected DateTime for timestamp-millis");
-
-            default:
-                throw new NotSupportedException($"Unsupported logical type: {logicalSchema.LogicalTypeName}");
+            elementType = type.GetElementType();
+            return true;
         }
-    }
 
-    // Convert Avro GenericRecord to CLR object
-    public static object FromGenericRecord(GenericRecord record, Type targetType)
-    {
-        var instance = Activator.CreateInstance(targetType);
-
-        foreach (var field in record.Schema.Fields)
+        if (type.IsGenericType &&
+            (type.GetGenericTypeDefinition() == typeof(IEnumerable<>) ||
+             type.GetGenericTypeDefinition() == typeof(List<>) ||
+             type.GetGenericTypeDefinition() == typeof(IList<>)))
         {
+            elementType = type.GetGenericArguments()[0];
+            return true;
+        }
+
+        var iface = type.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+
+        if (iface != null)
+        {
+            elementType = iface.GetGenericArguments()[0];
+            return true;
+        }
+
+        elementType = null;
+        return false;
+    }
+}
