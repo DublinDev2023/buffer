@@ -150,12 +150,10 @@ public static class AvroConverter
     {
         foreach (var schema in unionSchema.Schemas)
         {
-            if (schema.Tag == Schema.Type.Null && value == null)
-                return schema;
-
-            if (value != null && IsInstanceOfSchema(schema, value))
+            if (IsInstanceOfSchema(schema, value))
                 return schema;
         }
+
         throw new InvalidOperationException($"No matching schema found in union for value of type {value.GetType().FullName}");
     }
 
@@ -168,13 +166,27 @@ public static class AvroConverter
         if (value == null)
             return false;
 
+        // Handle logical schema (e.g., timestamp-millis)
+        if (schema is LogicalSchema logicalSchema)
+        {
+            if ((logicalSchema.LogicalTypeName == "timestamp-millis" || logicalSchema.LogicalTypeName == "timestamp-micros")
+                && value is DateTime)
+            {
+                return true;
+            }
+
+            // Fall back to checking the base schema
+            return IsInstanceOfSchema(logicalSchema.BaseSchema, value);
+        }
+
         switch (schema.Tag)
         {
             case Schema.Type.Record:
                 var recordSchema = (RecordSchema)schema;
                 var type = value.GetType();
-                // Check if all schema fields exist as properties on the object (case-insensitive)
-                return recordSchema.Fields.All(f => type.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
+                // Match by shape — not type name
+                return recordSchema.Fields.All(f =>
+                    type.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
 
             case Schema.Type.String:
                 return value is string;
@@ -183,17 +195,22 @@ public static class AvroConverter
                 return value is int;
 
             case Schema.Type.Long:
-                if (value is long) return true;
-                if (value is DateTime) return true; // treat DateTime as long (timestamp millis)
-                return false;
+                return value is long || value is DateTime; // allow DateTime here
 
             case Schema.Type.Boolean:
                 return value is bool;
 
+            case Schema.Type.Float:
+                return value is float;
+
+            case Schema.Type.Double:
+                return value is double;
+
             case Schema.Type.Array:
                 return value is IEnumerable;
 
-            // Add more cases as needed
+            case Schema.Type.Enum:
+                return value.GetType().IsEnum;
 
             default:
                 return false;
