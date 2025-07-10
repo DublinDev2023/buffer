@@ -1,0 +1,85 @@
+ public static RecordSchema CreateSchema(Type type, string recordName = null)
+    {
+        recordName ??= type.Name;
+        var fields = new List<Field>();
+
+        foreach (var prop in type.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+        {
+            var schema = GetSchemaForType(prop.PropertyType, prop.Name);
+            fields.Add(new Field(schema, prop.Name, null, null));
+        }
+
+        return new RecordSchema(recordName, null, new List<string>(), fields);
+    }
+
+    private static Schema GetSchemaForType(Type type, string nameHint = null)
+    {
+        if (type == typeof(string)) return Schema.Parse("\"string\"");
+        if (type == typeof(int)) return Schema.Parse("\"int\"");
+        if (type == typeof(long)) return Schema.Parse("\"long\"");
+        if (type == typeof(bool)) return Schema.Parse("\"boolean\"");
+        if (type == typeof(float)) return Schema.Parse("\"float\"");
+        if (type == typeof(double)) return Schema.Parse("\"double\"");
+        if (type == typeof(byte[])) return Schema.Parse("\"bytes\"");
+        if (type.IsEnum) return Schema.Parse("\"string\""); // serialize enums as strings
+
+        if (typeof(IEnumerable).IsAssignableFrom(type) && type != typeof(string))
+        {
+            var elemType = type.IsArray ? type.GetElementType() : type.GetGenericArguments()[0];
+            var itemSchema = GetSchemaForType(elemType);
+            return new ArraySchema(itemSchema);
+        }
+
+        // Fallback for nested objects
+        return CreateSchema(type, nameHint ?? type.Name);
+    }
+
+    public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
+    {
+        var record = new GenericRecord(schema);
+
+        foreach (var field in schema.Fields)
+        {
+            var prop = obj.GetType().GetProperty(field.Name);
+            if (prop == null) continue;
+
+            var value = prop.GetValue(obj);
+            var fieldSchema = field.Schema;
+
+            record.Add(field.Name, ConvertValue(value, fieldSchema));
+        }
+
+        return record;
+    }
+
+    private static object ConvertValue(object value, Schema schema)
+    {
+        if (value == null) return null;
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.Boolean:
+            case Schema.Type.Int:
+            case Schema.Type.Long:
+            case Schema.Type.Float:
+            case Schema.Type.Double:
+            case Schema.Type.String:
+            case Schema.Type.Bytes:
+                return value;
+
+            case Schema.Type.Array:
+                var arrSchema = (ArraySchema)schema;
+                var list = new List<object>();
+                foreach (var item in (IEnumerable)value)
+                {
+                    list.Add(ConvertValue(item, arrSchema.ItemSchema));
+                }
+                return list;
+
+            case Schema.Type.Record:
+                var recSchema = (RecordSchema)schema;
+                return ToGenericRecord(value, recSchema);
+        }
+
+        throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
+    }
