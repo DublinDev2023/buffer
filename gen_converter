@@ -1,0 +1,202 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Avro;
+using Avro.Generic;
+
+public static class AvroConverter
+{
+    // Public API: Convert any object to GenericRecord given the Avro schema
+    public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
+    {
+        if (obj == null) throw new ArgumentNullException(nameof(obj));
+        if (schema == null) throw new ArgumentNullException(nameof(schema));
+        return (GenericRecord)ConvertToAvroValue(obj, schema)!;
+    }
+
+    // Public API: Convert GenericRecord back to CLR object of type T
+    public static T FromGenericRecord<T>(GenericRecord record) where T : new()
+    {
+        if (record == null) throw new ArgumentNullException(nameof(record));
+        return (T)ConvertFromAvroValue(record, typeof(T))!;
+    }
+
+    // --- Internal recursive converter to Avro-compatible object (GenericRecord, list, primitive, etc.)
+    private static object? ConvertToAvroValue(object? value, Schema schema)
+    {
+        if (value == null) return null;
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.Union:
+                var unionSchema = (UnionSchema)schema;
+                var actualSchema = GetUnionBranchSchema(unionSchema, value);
+                return ConvertToAvroValue(value, actualSchema);
+
+            case Schema.Type.Record:
+                var recordSchema = (RecordSchema)schema;
+                var record = new GenericRecord(recordSchema);
+                var type = value.GetType();
+
+                foreach (var field in recordSchema.Fields)
+                {
+                    var prop = type.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                    var propValue = prop?.GetValue(value);
+                    record.Add(field.Name, ConvertToAvroValue(propValue, field.Schema));
+                }
+                return record;
+
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
+                var list = ((IEnumerable)value).Cast<object>().ToList();
+                return list.Select(item => ConvertToAvroValue(item, arraySchema.ItemSchema)).ToList();
+
+            // Handle primitive types and logical types (like DateTime)
+            case Schema.Type.String:
+                return value.ToString();
+
+            case Schema.Type.Int:
+                return Convert.ToInt32(value);
+
+            case Schema.Type.Long:
+                if (value is DateTime dt)
+                {
+                    // Convert DateTime to unix epoch millis (example for timestamp-millis)
+                    var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                    return (long)(dt.ToUniversalTime() - epoch).TotalMilliseconds;
+                }
+                return Convert.ToInt64(value);
+
+            case Schema.Type.Boolean:
+                return Convert.ToBoolean(value);
+
+            case Schema.Type.Float:
+                return Convert.ToSingle(value);
+
+            case Schema.Type.Double:
+                return Convert.ToDouble(value);
+
+            case Schema.Type.Null:
+                return null;
+
+            default:
+                // For fixed, enum, bytes, etc. add handling as needed
+                return value;
+        }
+    }
+
+    // --- Internal recursive converter from GenericRecord/Avro value to CLR object
+    private static object? ConvertFromAvroValue(object? value, Type targetType)
+    {
+        if (value == null) return null;
+
+        if (typeof(GenericRecord).IsAssignableFrom(value.GetType()))
+        {
+            var record = (GenericRecord)value;
+            var obj = Activator.CreateInstance(targetType)!;
+
+            foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                if (!record.Schema.Fields.Any(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase)))
+                    continue;
+
+                var field = record.Schema.Fields.First(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                var fieldValue = record[field.Name];
+                var propValue = ConvertFromAvroValue(fieldValue, prop.PropertyType);
+                prop.SetValue(obj, propValue);
+            }
+            return obj;
+        }
+        else if (typeof(IEnumerable).IsAssignableFrom(targetType) && targetType != typeof(string))
+        {
+            var elementType = targetType.IsArray
+                ? targetType.GetElementType()
+                : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
+
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType))!;
+            foreach (var item in (IEnumerable)value)
+            {
+                list.Add(ConvertFromAvroValue(item, elementType));
+            }
+
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(elementType!, list.Count);
+                list.CopyTo(array, 0);
+                return array;
+            }
+            else
+            {
+                return list;
+            }
+        }
+        else if (targetType == typeof(DateTime) && value is long longVal)
+        {
+            // Assuming timestamp-millis logical type
+            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            return epoch.AddMilliseconds(longVal).ToLocalTime();
+        }
+        else
+        {
+            // Primitive cast
+            return Convert.ChangeType(value, targetType);
+        }
+    }
+
+    // --- Helper to pick correct union branch schema based on runtime value shape
+    private static Schema GetUnionBranchSchema(UnionSchema unionSchema, object value)
+    {
+        foreach (var schema in unionSchema.Schemas)
+        {
+            if (schema.Tag == Schema.Type.Null && value == null)
+                return schema;
+
+            if (value != null && IsInstanceOfSchema(schema, value))
+                return schema;
+        }
+        throw new InvalidOperationException($"No matching schema found in union for value of type {value.GetType().FullName}");
+    }
+
+    // --- Heuristic to detect if value matches schema, by shape and type
+    private static bool IsInstanceOfSchema(Schema schema, object value)
+    {
+        if (schema.Tag == Schema.Type.Null)
+            return value == null;
+
+        if (value == null)
+            return false;
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.Record:
+                var recordSchema = (RecordSchema)schema;
+                var type = value.GetType();
+                // Check if all schema fields exist as properties on the object (case-insensitive)
+                return recordSchema.Fields.All(f => type.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
+
+            case Schema.Type.String:
+                return value is string;
+
+            case Schema.Type.Int:
+                return value is int;
+
+            case Schema.Type.Long:
+                if (value is long) return true;
+                if (value is DateTime) return true; // treat DateTime as long (timestamp millis)
+                return false;
+
+            case Schema.Type.Boolean:
+                return value is bool;
+
+            case Schema.Type.Array:
+                return value is IEnumerable;
+
+            // Add more cases as needed
+
+            default:
+                return false;
+        }
+    }
+}
