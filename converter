@@ -164,7 +164,6 @@ class Program
 }
 
 -- map back
-
 using Avro.Generic;
 using System;
 using System.Collections;
