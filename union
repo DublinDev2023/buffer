@@ -1,34 +1,45 @@
-private static object? ConvertToAvroValue(object? value, Schema schema)
+private static Schema GetUnionBranchSchema(UnionSchema unionSchema, object value)
 {
-    if (value == null) return null;
+    foreach (var schema in unionSchema.Schemas)
+    {
+        if (schema.Tag == Schema.Type.Null && value == null)
+            return schema;
 
+        if (value != null && IsInstanceOfSchema(schema, value))
+            return schema;
+    }
+
+    throw new InvalidOperationException($"No matching schema found in union for value of type {value.GetType().FullName}");
+}
+
+// Simple type check helper
+private static bool IsInstanceOfSchema(Schema schema, object value)
+{
     switch (schema.Tag)
     {
-        case Schema.Type.Union:
-            var unionSchema = (UnionSchema)schema;
-            // Correctly pick the schema branch matching the runtime value
-            var actualSchema = unionSchema.GetSchema(value);
-            return ConvertToAvroValue(value, actualSchema);
-
         case Schema.Type.Record:
             var recordSchema = (RecordSchema)schema;
-            var record = new GenericRecord(recordSchema);
-            var type = value.GetType();
+            // Check if value's CLR type name matches record schema name
+            return string.Equals(value.GetType().Name, recordSchema.Name, StringComparison.OrdinalIgnoreCase);
 
-            foreach (var field in recordSchema.Fields)
-            {
-                var prop = type.GetProperty(field.Name);
-                var propValue = prop?.GetValue(value);
-                record.Add(field.Name, ConvertToAvroValue(propValue, field.Schema));
-            }
-            return record;
+        case Schema.Type.String:
+            return value is string;
+
+        case Schema.Type.Int:
+            return value is int;
+
+        case Schema.Type.Long:
+            return value is long;
+
+        case Schema.Type.Boolean:
+            return value is bool;
 
         case Schema.Type.Array:
-            var arraySchema = (ArraySchema)schema;
-            var list = ((IEnumerable)value).Cast<object>().ToList();
-            return list.Select(item => ConvertToAvroValue(item, arraySchema.ItemSchema)).ToList();
+            return value is IEnumerable;
+
+        // Add more types here as needed
 
         default:
-            return value;
+            return false;
     }
 }
