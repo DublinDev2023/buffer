@@ -1,4 +1,15 @@
-public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema schema)
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Avro;
+using Avro.Generic;
+
+public static class AvroGenericMapper
+{
+    // Convert C# object to GenericRecord
+    public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
         var record = new GenericRecord(schema);
 
@@ -10,21 +21,21 @@ public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema sche
             var value = prop.GetValue(obj);
             var fieldSchema = UnwrapNullable(field.Schema);
 
-            var converted = ConvertValue(value, fieldSchema);
+            var converted = ConvertToAvroValue(value, fieldSchema);
             record.Add(field.Name, converted);
         }
 
         return record;
     }
 
-    private static object ConvertValue(object value, Schema schema)
+    private static object ConvertToAvroValue(object value, Schema schema)
     {
         if (value == null)
         {
             if (schema is UnionSchema union && union.Schemas.Any(s => s.Tag == Schema.Type.Null))
                 return null;
 
-            throw new InvalidOperationException("Value is null but schema doesn't allow nulls.");
+            throw new InvalidOperationException("Null value not allowed for this schema.");
         }
 
         switch (schema)
@@ -32,25 +43,87 @@ public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema sche
             case PrimitiveSchema _:
                 return value;
 
-            case RecordSchema recordSchema:
-                return ConvertToGenericRecord(value, recordSchema);
+            case RecordSchema recSchema:
+                return ToGenericRecord(value, recSchema);
 
-            case ArraySchema arraySchema:
+            case ArraySchema arrSchema:
                 var result = new List<object>();
                 foreach (var item in (IEnumerable)value)
                 {
-                    var itemSchema = UnwrapNullable(arraySchema.ItemSchema);
-                    result.Add(ConvertValue(item, itemSchema));
+                    result.Add(ConvertToAvroValue(item, UnwrapNullable(arrSchema.ItemSchema)));
                 }
                 return result;
 
             case UnionSchema union:
-                var nonNullSchema = union.Schemas.FirstOrDefault(s => s.Tag != Schema.Type.Null);
-                return ConvertValue(value, nonNullSchema);
+                var nonNullSchema = union.Schemas.First(s => s.Tag != Schema.Type.Null);
+                return ConvertToAvroValue(value, nonNullSchema);
 
             default:
                 throw new NotSupportedException($"Unsupported schema type: {schema.Tag}");
         }
+    }
+
+    // Convert GenericRecord back to C# object
+    public static object FromGenericRecord(GenericRecord record, Type targetType)
+    {
+        var instance = Activator.CreateInstance(targetType);
+
+        foreach (var field in record.Schema.Fields)
+        {
+            var prop = targetType.GetProperty(field.Name);
+            if (prop == null || !prop.CanWrite) continue;
+
+            var fieldValue = record[field.Name];
+            var propValue = ConvertToClrValue(fieldValue, prop.PropertyType, field.Schema);
+            prop.SetValue(instance, propValue);
+        }
+
+        return instance;
+    }
+
+    private static object ConvertToClrValue(object value, Type targetType, Schema schema)
+    {
+        if (value == null) return null;
+
+        var unwrappedSchema = UnwrapNullable(schema);
+
+        if (unwrappedSchema is PrimitiveSchema)
+        {
+            return Convert.ChangeType(value, targetType);
+        }
+
+        if (unwrappedSchema is RecordSchema recSchema)
+        {
+            return FromGenericRecord((GenericRecord)value, targetType);
+        }
+
+        if (unwrappedSchema is ArraySchema arraySchema)
+        {
+            var itemType = targetType.IsArray
+                ? targetType.GetElementType()
+                : targetType.GetGenericArguments().First();
+
+            var list = (IList)value;
+            var resultList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
+
+            foreach (var item in list)
+            {
+                var converted = ConvertToClrValue(item, itemType, arraySchema.ItemSchema);
+                resultList.Add(converted);
+            }
+
+            // Handle List<T> or T[]
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(itemType, resultList.Count);
+                resultList.CopyTo(array, 0);
+                return array;
+            }
+
+            return resultList;
+        }
+
+        throw new NotSupportedException($"Cannot convert schema type {schema.Tag} to CLR type {targetType.Name}");
     }
 
     private static Schema UnwrapNullable(Schema schema)
@@ -63,3 +136,4 @@ public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema sche
         }
         return schema;
     }
+}
