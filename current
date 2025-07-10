@@ -1,0 +1,198 @@
+using System;
+using System.Collections;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
+using Avro;
+using Avro.Generic;
+
+public static class AvroGenericConverter
+{
+    // Converts arbitrary CLR object to Avro GenericRecord according to schema
+    public static object? ToGenericRecord(object? obj, Schema schema)
+    {
+        if (obj == null) return null;
+
+        if (schema is UnionSchema unionSchema)
+        {
+            var branchSchema = FindMatchingUnionSchema(unionSchema, obj);
+            return ToGenericRecord(obj, branchSchema);
+        }
+
+        if (schema is LogicalSchema logicalSchema)
+        {
+            return ToGenericRecord(obj, logicalSchema.BaseSchema);
+        }
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.Record:
+                var recordSchema = (RecordSchema)schema;
+                var record = new GenericRecord(recordSchema);
+                var objType = obj.GetType();
+                foreach (var field in recordSchema.Fields)
+                {
+                    var prop = objType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+                    var value = prop?.GetValue(obj);
+                    record.Add(field.Name, ToGenericRecord(value, field.Schema));
+                }
+                return record;
+
+            case Schema.Type.Array:
+                var arraySchema = (ArraySchema)schema;
+                var list = (IEnumerable)obj;
+                return list.Cast<object>().Select(i => ToGenericRecord(i, arraySchema.ItemSchema)).ToList();
+
+            case Schema.Type.String:
+                return obj.ToString();
+
+            case Schema.Type.Int:
+                return Convert.ToInt32(obj);
+
+            case Schema.Type.Long:
+                if (obj is DateTime dt)
+                {
+                    var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+                    return (long)(dt.ToUniversalTime() - epoch).TotalMilliseconds;
+                }
+                return Convert.ToInt64(obj);
+
+            case Schema.Type.Boolean:
+                return Convert.ToBoolean(obj);
+
+            case Schema.Type.Float:
+                return Convert.ToSingle(obj);
+
+            case Schema.Type.Double:
+                return Convert.ToDouble(obj);
+
+            case Schema.Type.Enum:
+                return obj.ToString();
+
+            case Schema.Type.Null:
+                return null;
+
+            default:
+                throw new NotSupportedException($"Unsupported Avro schema type: {schema.Tag}");
+        }
+    }
+
+    // Converts Avro GenericRecord back to CLR object of type T
+    public static T FromGenericRecord<T>(GenericRecord record) where T : new()
+    {
+        return (T)FromGenericRecord(record, typeof(T));
+    }
+
+    private static object? FromGenericRecord(object? value, Type targetType)
+    {
+        if (value == null) return null;
+
+        if (value is GenericRecord record)
+        {
+            var obj = Activator.CreateInstance(targetType)!;
+            foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
+            {
+                var field = record.Schema.Fields.FirstOrDefault(f => string.Equals(f.Name, prop.Name, StringComparison.OrdinalIgnoreCase));
+                if (field == null) continue;
+
+                var fieldValue = record[field.Name];
+                var propValue = FromGenericRecord(fieldValue, prop.PropertyType);
+                prop.SetValue(obj, propValue);
+            }
+            return obj;
+        }
+
+        if (typeof(IEnumerable).IsAssignableFrom(targetType) && targetType != typeof(string))
+        {
+            var elementType = targetType.IsArray
+                ? targetType.GetElementType()!
+                : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
+
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType))!;
+            foreach (var item in (IEnumerable)value)
+            {
+                list.Add(FromGenericRecord(item, elementType)!);
+            }
+
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(elementType, list.Count);
+                list.CopyTo(array, 0);
+                return array;
+            }
+            return list;
+        }
+
+        if (targetType == typeof(DateTime) && value is long millis)
+        {
+            var epoch = new DateTime(1970, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+            return epoch.AddMilliseconds(millis).ToLocalTime();
+        }
+
+        if (targetType.IsEnum)
+        {
+            return Enum.Parse(targetType, value.ToString()!);
+        }
+
+        return Convert.ChangeType(value, targetType);
+    }
+
+    private static Schema FindMatchingUnionSchema(UnionSchema unionSchema, object value)
+    {
+        foreach (var schema in unionSchema.Schemas)
+        {
+            if (IsMatchingSchema(schema, value))
+                return schema;
+        }
+        throw new InvalidOperationException($"No matching schema in union for value of type {value.GetType().FullName}");
+    }
+
+    private static bool IsMatchingSchema(Schema schema, object value)
+    {
+        if (schema.Tag == Schema.Type.Null && value == null)
+            return true;
+
+        if (value == null)
+            return false;
+
+        if (schema is LogicalSchema logicalSchema)
+            return IsMatchingSchema(logicalSchema.BaseSchema, value);
+
+        switch (schema.Tag)
+        {
+            case Schema.Type.Record:
+                var recordSchema = (RecordSchema)schema;
+                var valueType = value.GetType();
+                // Match by name or properties
+                return valueType.Name.Equals(recordSchema.Name, StringComparison.OrdinalIgnoreCase) ||
+                       recordSchema.Fields.All(f => valueType.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
+
+            case Schema.Type.String:
+                return value is string;
+
+            case Schema.Type.Int:
+                return value is int;
+
+            case Schema.Type.Long:
+                return value is long || value is DateTime;
+
+            case Schema.Type.Boolean:
+                return value is bool;
+
+            case Schema.Type.Float:
+                return value is float;
+
+            case Schema.Type.Double:
+                return value is double;
+
+            case Schema.Type.Enum:
+                return value.GetType().IsEnum;
+
+            case Schema.Type.Array:
+                return value is IEnumerable;
+
+            default:
+                return false;
+        }
+    }
+}
