@@ -6,9 +6,9 @@ using System.Reflection;
 using Avro;
 using Avro.Generic;
 
-public static class AvroGenericMapper3
+public static class AvroGenericMapper4
 {
-    // PUBLIC: Convert CLR object to GenericRecord
+    // Convert CLR object to Avro GenericRecord
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
         var record = new GenericRecord(schema);
@@ -19,30 +19,31 @@ public static class AvroGenericMapper3
             if (prop == null) continue;
 
             var value = prop.GetValue(obj);
-            var fieldSchema = UnwrapNullable(field.Schema);
-
-            var avroValue = ConvertToAvroValue(value, field.Schema); // use full schema for Union handling
+            var avroValue = ConvertToAvroValue(value, field.Schema); // pass full schema (may be Union)
             record.Add(field.Name, avroValue);
         }
 
         return record;
     }
 
-    // PRIVATE: Convert CLR value to Avro-compatible value
+    // Convert CLR value to Avro-compatible value
     private static object ConvertToAvroValue(object value, Schema schema)
     {
-        if (value == null)
+        if (schema is UnionSchema unionSchema)
         {
-            // Handle nullable unions
-            if (schema is UnionSchema union && union.Schemas.Any(s => s.Tag == Schema.Type.Null))
+            if (value == null && unionSchema.Schemas.Any(s => s.Tag == Schema.Type.Null))
                 return null;
 
-            throw new InvalidOperationException("Null not allowed for this schema.");
+            var nonNullSchema = unionSchema.Schemas.First(s => s.Tag != Schema.Type.Null);
+            return ConvertToAvroValue(value, nonNullSchema);
         }
 
-        var actualSchema = UnwrapNullable(schema);
+        if (value == null)
+        {
+            throw new InvalidOperationException($"Value is null, but schema '{schema}' does not allow nulls.");
+        }
 
-        switch (actualSchema)
+        switch (schema)
         {
             case PrimitiveSchema _:
                 return value;
@@ -50,24 +51,20 @@ public static class AvroGenericMapper3
             case RecordSchema recSchema:
                 return ToGenericRecord(value, recSchema);
 
-            case ArraySchema arraySchema:
+            case ArraySchema arrSchema:
                 var list = new List<object>();
                 foreach (var item in (IEnumerable)value)
                 {
-                    list.Add(ConvertToAvroValue(item, arraySchema.ItemSchema));
+                    list.Add(ConvertToAvroValue(item, arrSchema.ItemSchema));
                 }
                 return list;
 
-            case UnionSchema union:
-                var targetSchema = union.Schemas.First(s => s.Tag != Schema.Type.Null);
-                return ConvertToAvroValue(value, targetSchema);
-
             default:
-                throw new NotSupportedException($"Unsupported schema: {schema.GetType().Name}");
+                throw new NotSupportedException($"Unsupported schema type for serialization: {schema.Tag}");
         }
     }
 
-    // PUBLIC: Convert Avro GenericRecord back to CLR object
+    // Convert Avro GenericRecord to CLR object
     public static object FromGenericRecord(GenericRecord record, Type targetType)
     {
         var instance = Activator.CreateInstance(targetType);
@@ -77,43 +74,53 @@ public static class AvroGenericMapper3
             var prop = targetType.GetProperty(field.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
             if (prop == null || !prop.CanWrite) continue;
 
-            var fieldValue = record[field.Name];
-            var clrValue = ConvertToClrValue(fieldValue, prop.PropertyType, field.Schema);
+            var avroValue = record[field.Name];
+            var clrValue = ConvertToClrValue(avroValue, prop.PropertyType, field.Schema);
             prop.SetValue(instance, clrValue);
         }
 
         return instance;
     }
 
-    // PRIVATE: Convert Avro value back to CLR-compatible value
+    // Convert Avro-compatible value to CLR type
     private static object ConvertToClrValue(object value, Type targetType, Schema schema)
     {
+        if (schema is UnionSchema unionSchema)
+        {
+            if (value == null) return null;
+
+            var activeSchema = unionSchema.Schemas.First(s =>
+            {
+                if (s.Tag == Schema.Type.Null) return false;
+                return true;
+            });
+
+            return ConvertToClrValue(value, targetType, activeSchema);
+        }
+
         if (value == null) return null;
 
-        var actualSchema = UnwrapNullable(schema);
-
-        if (actualSchema is PrimitiveSchema)
+        if (schema is PrimitiveSchema)
         {
             return Convert.ChangeType(value, Nullable.GetUnderlyingType(targetType) ?? targetType);
         }
 
-        if (actualSchema is RecordSchema recSchema)
+        if (schema is RecordSchema recSchema)
         {
             return FromGenericRecord((GenericRecord)value, targetType);
         }
 
-        if (actualSchema is ArraySchema arraySchema)
+        if (schema is ArraySchema arraySchema)
         {
             var itemType = targetType.IsArray
                 ? targetType.GetElementType()
                 : targetType.GetGenericArguments().FirstOrDefault() ?? typeof(object);
 
             var resultList = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(itemType));
-
             foreach (var item in (IEnumerable)value)
             {
-                var converted = ConvertToClrValue(item, itemType, arraySchema.ItemSchema);
-                resultList.Add(converted);
+                var convertedItem = ConvertToClrValue(item, itemType, arraySchema.ItemSchema);
+                resultList.Add(convertedItem);
             }
 
             if (targetType.IsArray)
@@ -126,24 +133,6 @@ public static class AvroGenericMapper3
             return resultList;
         }
 
-        if (actualSchema is UnionSchema union)
-        {
-            var targetSubSchema = union.Schemas.First(s => s.Tag != Schema.Type.Null);
-            return ConvertToClrValue(value, targetType, targetSubSchema);
-        }
-
-        throw new NotSupportedException($"Cannot convert Avro schema '{schema.Tag}' to CLR type '{targetType.Name}'");
-    }
-
-    // PRIVATE: Unwrap nullable union schemas (["null", "X"])
-    private static Schema UnwrapNullable(Schema schema)
-    {
-        if (schema is UnionSchema union &&
-            union.Schemas.Count == 2 &&
-            union.Schemas.Any(s => s.Tag == Schema.Type.Null))
-        {
-            return union.Schemas.First(s => s.Tag != Schema.Type.Null);
-        }
-        return schema;
+        throw new NotSupportedException($"Unsupported schema type for deserialization: {schema.Tag}");
     }
 }
