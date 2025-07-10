@@ -1,0 +1,5 @@
+var recordSchema = (RecordSchema)schema;
+    var type = value.GetType();
+    // Check if ALL required fields exist as properties on the object
+    return recordSchema.Fields.All(f =>
+        type.GetProperty(f.Name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase) != null);
