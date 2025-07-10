@@ -181,7 +181,7 @@ public static class AvroMapper
 
     private static object MapToType(object avroObject, Type targetType)
     {
-        if (avroObject is null)
+        if (avroObject == null)
             return null;
 
         if (avroObject is GenericRecord record)
@@ -194,67 +194,56 @@ public static class AvroMapper
                     continue;
 
                 var propType = prop.PropertyType;
-                object mappedValue = null;
-
-                if (value is GenericRecord nestedRecord)
-                {
-                    mappedValue = MapToType(nestedRecord, propType);
-                }
-                else if (value is IList avroList && IsEnumerableType(propType, out var elementType))
-                {
-                    var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
-                    foreach (var item in avroList)
-                    {
-                        list.Add(MapToType(item, elementType));
-                    }
-
-                    if (propType.IsArray)
-                    {
-                        var array = Array.CreateInstance(elementType, list.Count);
-                        list.CopyTo(array, 0);
-                        mappedValue = array;
-                    }
-                    else
-                    {
-                        mappedValue = list;
-                    }
-                }
-                else if (propType.IsEnum)
-                {
-                    mappedValue = Enum.Parse(propType, value.ToString());
-                }
-                else if (propType.IsAssignableFrom(value.GetType()))
-                {
-                    mappedValue = value;
-                }
-                else
-                {
-                    try
-                    {
-                        mappedValue = Convert.ChangeType(value, propType);
-                    }
-                    catch
-                    {
-                        continue;
-                    }
-                }
-
+                object mappedValue = MapFieldValue(value, propType);
                 prop.SetValue(result, mappedValue);
             }
-
             return result;
         }
 
-        // Handle scalar or primitive values
-        if (targetType.IsEnum)
-            return Enum.Parse(targetType, avroObject.ToString());
+        return MapFieldValue(avroObject, targetType);
+    }
 
-        if (targetType.IsAssignableFrom(avroObject.GetType()))
-            return avroObject;
+    private static object MapFieldValue(object value, Type targetType)
+    {
+        if (value == null)
+            return null;
+
+        if (value is GenericRecord nestedRecord)
+        {
+            return MapToType(nestedRecord, targetType);
+        }
+
+        if (value is IList avroList && IsEnumerableType(targetType, out var elementType))
+        {
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
+            foreach (var item in avroList)
+            {
+                list.Add(MapFieldValue(item, elementType));
+            }
+
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(elementType, list.Count);
+                list.CopyTo(array, 0);
+                return array;
+            }
+
+            return list;
+        }
+
+        if (targetType.IsEnum)
+        {
+            return Enum.Parse(targetType, value.ToString());
+        }
+
+        if (targetType.IsAssignableFrom(value.GetType()))
+        {
+            return value;
+        }
 
         try
         {
-            return Convert.ChangeType(avroObject, targetType);
+            return Convert.ChangeType(value, targetType);
         }
         catch
         {
