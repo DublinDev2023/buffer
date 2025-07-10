@@ -164,16 +164,7 @@ class Program
 }
 
 -- map back
-using Avro.Generic;
-using System;
-using System.Collections;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
-
-public static class AvroMapper
-{
-    public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
+public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
     {
         return (T)MapToType(record, typeof(T));
     }
@@ -188,17 +179,21 @@ public static class AvroMapper
             var result = Activator.CreateInstance(targetType);
             foreach (var field in record.Schema.Fields)
             {
-                var prop = targetType.GetProperty(field.Name, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
-                if (prop == null || !record.TryGetValue(field.Name, out var value) || value == null)
+                var prop = targetType
+                    .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                    .FirstOrDefault(p => string.Equals(p.Name, field.Name, StringComparison.OrdinalIgnoreCase));
+
+                if (prop == null || !record.TryGetValue(field.Name, out var value))
                     continue;
 
-                var propType = prop.PropertyType;
-                object mappedValue = MapFieldValue(value, propType);
+                object mappedValue = MapFieldValue(value, prop.PropertyType);
                 prop.SetValue(result, mappedValue);
             }
+
             return result;
         }
 
+        // Not a GenericRecord — map normally
         return MapFieldValue(avroObject, targetType);
     }
 
@@ -207,17 +202,20 @@ public static class AvroMapper
         if (value == null)
             return null;
 
+        // Nested object
         if (value is GenericRecord nestedRecord)
         {
             return MapToType(nestedRecord, targetType);
         }
 
+        // List or array
         if (value is IList avroList && IsEnumerableType(targetType, out var elementType))
         {
             var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
             foreach (var item in avroList)
             {
-                list.Add(MapFieldValue(item, elementType));
+                object mappedItem = MapFieldValue(item, elementType);
+                list.Add(mappedItem);
             }
 
             if (targetType.IsArray)
@@ -230,16 +228,19 @@ public static class AvroMapper
             return list;
         }
 
+        // Enum
         if (targetType.IsEnum)
         {
             return Enum.Parse(targetType, value.ToString());
         }
 
+        // Direct assignable
         if (targetType.IsAssignableFrom(value.GetType()))
         {
             return value;
         }
 
+        // Convert
         try
         {
             return Convert.ChangeType(value, targetType);
@@ -258,22 +259,24 @@ public static class AvroMapper
             return true;
         }
 
-        if (type.IsGenericType && typeof(IEnumerable<>).IsAssignableFrom(type.GetGenericTypeDefinition()))
+        if (type.IsGenericType &&
+            (type.GetGenericTypeDefinition() == typeof(IEnumerable<>) ||
+             type.GetGenericTypeDefinition() == typeof(List<>) ||
+             type.GetGenericTypeDefinition() == typeof(IList<>)))
         {
             elementType = type.GetGenericArguments()[0];
             return true;
         }
 
-        var ienumerable = type.GetInterfaces()
+        var iface = type.GetInterfaces()
             .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
 
-        if (ienumerable != null)
+        if (iface != null)
         {
-            elementType = ienumerable.GetGenericArguments()[0];
+            elementType = iface.GetGenericArguments()[0];
             return true;
         }
 
         elementType = null;
         return false;
     }
-}
