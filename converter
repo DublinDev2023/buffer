@@ -163,5 +163,58 @@ class Program
     }
 }
 
+-- map back
+
+using Avro.Generic;
+using System.Reflection;
+
+public static class AvroMapper
+{
+    public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
+    {
+        return (T)MapToType(record, typeof(T));
+    }
+
+    private static object MapToType(object avroObject, Type targetType)
+    {
+        if (avroObject is GenericRecord record)
+        {
+            var result = Activator.CreateInstance(targetType);
+
+            foreach (var field in record.Schema.Fields)
+            {
+                var prop = targetType.GetProperty(field.Name, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
+                if (prop == null) continue;
+
+                if (!record.TryGetValue(field.Name, out var value) || value == null) continue;
+
+                var propType = prop.PropertyType;
+
+                if (value is GenericRecord nestedRecord)
+                {
+                    // Recursively map nested records
+                    var nestedValue = MapToType(nestedRecord, propType);
+                    prop.SetValue(result, nestedValue);
+                }
+                else if (propType.IsEnum)
+                {
+                    prop.SetValue(result, Enum.Parse(propType, value.ToString()));
+                }
+                else if (value != null && propType != value.GetType())
+                {
+                    prop.SetValue(result, Convert.ChangeType(value, propType));
+                }
+                else
+                {
+                    prop.SetValue(result, value);
+                }
+            }
+
+            return result;
+        }
+
+        return avroObject;
+    }
+}
 
 
