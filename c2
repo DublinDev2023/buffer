@@ -1,68 +1,138 @@
-using Avro;
 using Avro.Generic;
+using Avro.Specific;
+using Avro.Util;
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 
-public static class AvroGenericConverter
+public static class AvroMapper
 {
-    public static GenericRecord ConvertToGenericRecord(object obj, RecordSchema schema)
+    public static T MapGenericRecordTo<T>(GenericRecord record) where T : new()
     {
-        var record = new GenericRecord(schema);
-
-        foreach (var field in schema.Fields)
-        {
-            var prop = obj.GetType().GetProperty(field.Name);
-            if (prop == null) continue;
-
-            var value = prop.GetValue(obj);
-            var fieldSchema = UnwrapNullable(field.Schema);
-
-            object converted = ConvertValue(value, fieldSchema);
-            record.Add(field.Name, converted);
-        }
-
-        return record;
+        return (T)MapToType(record, typeof(T));
     }
 
-    private static object ConvertValue(object value, Schema schema)
+    private static object MapToType(object avroObject, Type targetType)
     {
-        if (value == null) return null;
+        if (avroObject == null)
+            return null;
 
-        switch (schema)
+        // GenericRecord -> object
+        if (avroObject is GenericRecord record)
         {
-            case PrimitiveSchema _:
-                return value;
+            var result = Activator.CreateInstance(targetType);
+            foreach (var field in record.Schema.Fields)
+            {
+                var prop = targetType
+                    .GetProperties(BindingFlags.Instance | BindingFlags.Public)
+                    .FirstOrDefault(p => string.Equals(p.Name, field.Name, StringComparison.OrdinalIgnoreCase));
 
-            case RecordSchema recSchema:
-                return ConvertToGenericRecord(value, recSchema);
+                if (prop == null || !record.TryGetValue(field.Name, out var value))
+                    continue;
 
-            case ArraySchema arrSchema:
-                var list = new List<object>();
-                foreach (var item in (IEnumerable)value)
-                {
-                    list.Add(ConvertValue(item, UnwrapNullable(arrSchema.ItemSchema)));
-                }
-                return list;
+                object mappedValue = MapFieldValue(value, prop.PropertyType);
+                prop.SetValue(result, mappedValue);
+            }
 
-            case UnionSchema union:
-                var actual = union.Schemas.First(s => s.Type != Schema.Type.Null);
-                return ConvertValue(value, actual);
+            return result;
+        }
 
-            default:
-                throw new NotSupportedException($"Unsupported schema type: {schema.Type}");
+        // Fallback for raw values
+        return MapFieldValue(avroObject, targetType);
+    }
+
+    private static object MapFieldValue(object value, Type targetType)
+    {
+        if (value == null)
+            return null;
+
+        // Handle union values (e.g., ["null", "record"])
+        if (value is Union union)
+        {
+            value = union.Value;
+        }
+
+        if (value == null)
+            return null;
+
+        // If it's a nested record
+        if (value is GenericRecord nestedRecord)
+        {
+            return MapToType(nestedRecord, targetType);
+        }
+
+        // List or array
+        if (value is IList avroList && IsEnumerableType(targetType, out var elementType))
+        {
+            var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
+            foreach (var item in avroList)
+            {
+                var mappedItem = MapFieldValue(item, elementType);
+                list.Add(mappedItem);
+            }
+
+            if (targetType.IsArray)
+            {
+                var array = Array.CreateInstance(elementType, list.Count);
+                list.CopyTo(array, 0);
+                return array;
+            }
+
+            return list;
+        }
+
+        // Enum
+        if (targetType.IsEnum)
+        {
+            return Enum.Parse(targetType, value.ToString());
+        }
+
+        // If already compatible
+        if (targetType.IsAssignableFrom(value.GetType()))
+        {
+            return value;
+        }
+
+        // Attempt conversion
+        try
+        {
+            return Convert.ChangeType(value, targetType);
+        }
+        catch
+        {
+            return null;
         }
     }
 
-    private static Schema UnwrapNullable(Schema schema)
+    private static bool IsEnumerableType(Type type, out Type elementType)
     {
-        if (schema is UnionSchema union && union.Schemas.Count == 2 &&
-            union.Schemas.Any(s => s.Type == Schema.Type.Null))
+        if (type.IsArray)
         {
-            return union.Schemas.First(s => s.Type != Schema.Type.Null);
+            elementType = type.GetElementType();
+            return true;
         }
-        return schema;
+
+        if (type.IsGenericType &&
+            (type.GetGenericTypeDefinition() == typeof(IEnumerable<>) ||
+             type.GetGenericTypeDefinition() == typeof(List<>) ||
+             type.GetGenericTypeDefinition() == typeof(IList<>)))
+        {
+            elementType = type.GetGenericArguments()[0];
+            return true;
+        }
+
+        var iface = type.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+
+        if (iface != null)
+        {
+            elementType = iface.GetGenericArguments()[0];
+            return true;
+        }
+
+        elementType = null;
+        return false;
     }
 }
