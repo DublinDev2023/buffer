@@ -190,30 +190,40 @@ public static class AvroMapper
             foreach (var field in record.Schema.Fields)
             {
                 var prop = targetType.GetProperty(field.Name, BindingFlags.IgnoreCase | BindingFlags.Public | BindingFlags.Instance);
-                if (prop == null) continue;
+                if (prop == null || !record.TryGetValue(field.Name, out var value) || value == null)
+                    continue;
 
-                if (!record.TryGetValue(field.Name, out var value) || value == null) continue;
-
+                var propType = prop.PropertyType;
                 object mappedValue = null;
 
                 if (value is GenericRecord nestedRecord)
                 {
-                    mappedValue = MapToType(nestedRecord, prop.PropertyType);
+                    mappedValue = MapToType(nestedRecord, propType);
                 }
-                else if (value is IList avroList && IsCollectionType(prop.PropertyType, out var elementType))
+                else if (value is IList avroList && IsEnumerableType(propType, out var elementType))
                 {
                     var list = (IList)Activator.CreateInstance(typeof(List<>).MakeGenericType(elementType));
                     foreach (var item in avroList)
                     {
                         list.Add(MapToType(item, elementType));
                     }
-                    mappedValue = list;
+
+                    if (propType.IsArray)
+                    {
+                        var array = Array.CreateInstance(elementType, list.Count);
+                        list.CopyTo(array, 0);
+                        mappedValue = array;
+                    }
+                    else
+                    {
+                        mappedValue = list;
+                    }
                 }
-                else if (prop.PropertyType.IsEnum)
+                else if (propType.IsEnum)
                 {
-                    mappedValue = Enum.Parse(prop.PropertyType, value.ToString());
+                    mappedValue = Enum.Parse(propType, value.ToString());
                 }
-                else if (prop.PropertyType.IsAssignableFrom(value.GetType()))
+                else if (propType.IsAssignableFrom(value.GetType()))
                 {
                     mappedValue = value;
                 }
@@ -221,11 +231,10 @@ public static class AvroMapper
                 {
                     try
                     {
-                        mappedValue = Convert.ChangeType(value, prop.PropertyType);
+                        mappedValue = Convert.ChangeType(value, propType);
                     }
                     catch
                     {
-                        // Conversion failed, skip this property
                         continue;
                     }
                 }
@@ -236,7 +245,7 @@ public static class AvroMapper
             return result;
         }
 
-        // Primitive or value types (or enum)
+        // Handle scalar or primitive values
         if (targetType.IsEnum)
             return Enum.Parse(targetType, avroObject.ToString());
 
@@ -253,20 +262,30 @@ public static class AvroMapper
         }
     }
 
-    private static bool IsCollectionType(Type type, out Type elementType)
+    private static bool IsEnumerableType(Type type, out Type elementType)
     {
-        elementType = null;
-        if (!type.IsGenericType) return false;
+        if (type.IsArray)
+        {
+            elementType = type.GetElementType();
+            return true;
+        }
 
-        var genericDef = type.GetGenericTypeDefinition();
-        if (genericDef == typeof(IEnumerable<>) || 
-            genericDef == typeof(IList<>) || 
-            genericDef == typeof(List<>))
+        if (type.IsGenericType && typeof(IEnumerable<>).IsAssignableFrom(type.GetGenericTypeDefinition()))
         {
             elementType = type.GetGenericArguments()[0];
             return true;
         }
 
+        var ienumerable = type.GetInterfaces()
+            .FirstOrDefault(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(IEnumerable<>));
+
+        if (ienumerable != null)
+        {
+            elementType = ienumerable.GetGenericArguments()[0];
+            return true;
+        }
+
+        elementType = null;
         return false;
     }
 }
