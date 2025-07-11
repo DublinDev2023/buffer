@@ -1,0 +1,72 @@
+// See https://aka.ms/new-console-template for more information
+using System.Diagnostics;
+
+class Program
+{
+    static async Task Main()
+    {
+        var exePaths = new[]
+        {
+            @"C:\MultiProject\Project1\Project1\bin\Debug\net9.0\Project1.exe",
+            @"C:\MultiProject\Project2\Project2\bin\Debug\net9.0\Project2.exe"
+        };
+
+        var tasks = new Task[exePaths.Length];
+
+        for (int i = 0; i < exePaths.Length; i++)
+        {
+            int index = i;
+            tasks[i] = Task.Run(() => RunProcess(exePaths[index], $"EXE{index + 1}"));
+        }
+
+        await Task.WhenAll(tasks);
+
+        Console.ReadLine();
+    }
+
+    static void RunProcess(string exePath, string tag)
+    {
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = exePath,
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            }
+        };
+
+        process.OutputDataReceived += (s, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                lock (Console.Out)
+                {
+                    Console.ForegroundColor = tag == "EXE1" ? ConsoleColor.Cyan : ConsoleColor.Yellow;
+                    Console.WriteLine($"[{tag}] {e.Data}");
+                    Console.ResetColor();
+                }
+            }
+        };
+
+        process.ErrorDataReceived += (s, e) =>
+        {
+            if (!string.IsNullOrEmpty(e.Data))
+            {
+                lock (Console.Out)
+                {
+                    Console.ForegroundColor = ConsoleColor.Red;
+                    Console.WriteLine($"[{tag} ERROR] {e.Data}");
+                    Console.ResetColor();
+                }
+            }
+        };
+
+        process.Start();
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+        process.WaitForExit();
+    }
+}
