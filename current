@@ -7,7 +7,7 @@ using Avro;
 using Avro.Generic;
 using Newtonsoft.Json.Linq;
 
-public static class AvroGenericConverter91
+public static class AvroGenericConverter03
 {
     public static GenericRecord ToGenericRecord(object obj, RecordSchema schema)
     {
