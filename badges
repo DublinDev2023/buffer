@@ -1,0 +1,19 @@
+void PrintBadge(string label, ConsoleColor badgeColor, string message)
+{
+    // Save current color
+    var originalColor = Console.ForegroundColor;
+
+    // Print badge
+    Console.ForegroundColor = badgeColor;
+    Console.Write($"[{label}] ");
+
+    // Reset to default for the rest of the line
+    Console.ForegroundColor = originalColor;
+    Console.WriteLine(message);
+}
+
+// Example usage
+PrintBadge("INFO", ConsoleColor.Cyan, "Server started on port 8080");
+PrintBadge("WARN", ConsoleColor.Yellow, "Disk usage at 90%");
+PrintBadge("ERROR", ConsoleColor.Red, "Connection failed");
+PrintBadge("OK", ConsoleColor.Green, "Backup completed successfully");
