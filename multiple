@@ -1,0 +1,54 @@
+using System;
+using System.Diagnostics;
+using System.Threading.Tasks;
+
+class Program
+{
+    static async Task Main()
+    {
+        // Define EXEs and their arguments
+        var processes = new[]
+        {
+            new { File = @"C:\Path\To\App1.exe", Args = "arg1 arg2" },
+            new { File = @"C:\Path\To\App2.exe", Args = "--run" }
+        };
+
+        // Launch all processes
+        var tasks = new Task[processes.Length];
+
+        for (int i = 0; i < processes.Length; i++)
+        {
+            int index = i; // Capture index for closure
+            tasks[i] = Task.Run(() => RunProcess(processes[index].File, processes[index].Args));
+        }
+
+        // Wait for all to complete
+        await Task.WhenAll(tasks);
+    }
+
+    static void RunProcess(string filePath, string arguments)
+    {
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = filePath,
+            Arguments = arguments,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        using var process = new Process { StartInfo = startInfo };
+
+        // Output handlers
+        process.OutputDataReceived += (s, e) => { if (e.Data != null) Console.WriteLine($"[OUT:{filePath}] {e.Data}"); };
+        process.ErrorDataReceived  += (s, e) => { if (e.Data != null) Console.Error.WriteLine($"[ERR:{filePath}] {e.Data}"); };
+
+        process.Start();
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        process.WaitForExit();
+    }
+}
