@@ -1,0 +1,102 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
+
+class MultiProcessLogger
+{
+    private class ProcessInfo
+    {
+        public string Name;
+        public string Path;
+        public ConsoleColor Color;
+    }
+
+    private static readonly ConsoleColor[] ColorPalette = new[]
+    {
+        ConsoleColor.Cyan,
+        ConsoleColor.Green,
+        ConsoleColor.Yellow,
+        ConsoleColor.Magenta,
+        ConsoleColor.Blue,
+        ConsoleColor.DarkCyan,
+        ConsoleColor.DarkYellow
+    };
+
+    public static void RunAll(params string[] executables)
+    {
+        var processes = new List<Process>();
+        var badgeMap = new Dictionary<string, ProcessInfo>();
+
+        for (int i = 0; i < executables.Length; i++)
+        {
+            string path = executables[i];
+            string name = System.IO.Path.GetFileNameWithoutExtension(path);
+            ConsoleColor color = ColorPalette[i % ColorPalette.Length];
+
+            var info = new ProcessInfo
+            {
+                Name = name,
+                Path = path,
+                Color = color
+            };
+            badgeMap[path] = info;
+
+            var proc = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = path,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    UseShellExecute = false,
+                    CreateNoWindow = true
+                },
+                EnableRaisingEvents = true
+            };
+
+            proc.OutputDataReceived += (s, e) => WriteLineWithBadge(info, e.Data);
+            proc.ErrorDataReceived += (s, e) => WriteLineWithBadge(info, e.Data, true);
+
+            proc.Start();
+            proc.BeginOutputReadLine();
+            proc.BeginErrorReadLine();
+
+            processes.Add(proc);
+        }
+
+        Console.WriteLine("All processes started. Press Ctrl+C to stop.");
+
+        // Wait for all processes
+        foreach (var proc in processes)
+        {
+            proc.WaitForExit();
+        }
+    }
+
+    private static readonly object _consoleLock = new();
+
+    private static void WriteLineWithBadge(ProcessInfo info, string? line, bool isError = false)
+    {
+        if (string.IsNullOrWhiteSpace(line)) return;
+
+        lock (_consoleLock)
+        {
+            Console.ForegroundColor = info.Color;
+            Console.Write($"[{info.Name}] ");
+            Console.ResetColor();
+
+            if (isError)
+                Console.ForegroundColor = ConsoleColor.Red;
+
+            Console.WriteLine(line);
+            Console.ResetColor();
+        }
+    }
+
+    // Example usage
+    public static void Main()
+    {
+        RunAll("App1.exe", "App2.exe", "App3.exe");
+    }
+}
