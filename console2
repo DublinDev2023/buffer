@@ -1,0 +1,28 @@
+class Program
+{
+    static void Main()
+    {
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "MyApp.exe",  // or full path
+                Arguments = "",          // optional args
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            }
+        };
+
+        process.OutputDataReceived += (sender, args) => Console.WriteLine($"[stdout] {args.Data}");
+        process.ErrorDataReceived += (sender, args) => Console.WriteLine($"[stderr] {args.Data}");
+
+        process.Start();
+
+        process.BeginOutputReadLine();
+        process.BeginErrorReadLine();
+
+        process.WaitForExit();
+    }
+}
