@@ -1,0 +1,25 @@
+using System.Text.Json;
+
+var json = File.ReadAllText("Properties/launchSettings.json");
+using var doc = JsonDocument.Parse(json);
+
+var profile = doc.RootElement.GetProperty("profiles").GetProperty("MyApp");
+
+var args = profile.GetProperty("commandLineArgs").GetString();
+var cwd = profile.GetProperty("workingDirectory").GetString();
+var envVars = profile.GetProperty("environmentVariables");
+
+var psi = new ProcessStartInfo
+{
+    FileName = Path.Combine(cwd, "MyApp.exe"),
+    Arguments = args,
+    WorkingDirectory = cwd,
+    UseShellExecute = false
+};
+
+foreach (var env in envVars.EnumerateObject())
+{
+    psi.Environment[env.Name] = env.Value.GetString();
+}
+
+Process.Start(psi);
