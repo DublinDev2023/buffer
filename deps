@@ -68,3 +68,50 @@ class Program
 
     static void WalkDependenciesToDataTable(
         string rootDll,
+        Assembly assembly,
+        MetadataLoadContext mlc,
+        HashSet<string> visited,
+        int nestingLevel,
+        DataTable table)
+    {
+        foreach (var name in assembly.GetReferencedAssemblies())
+        {
+            // Skip .NET Core & System/Microsoft assemblies
+            if (name.Name.StartsWith("System") ||
+                name.Name.StartsWith("Microsoft") ||
+                name.Name.Equals("netstandard"))
+                continue;
+
+            // Prevent duplicates
+            if (!visited.Add(name.FullName))
+                continue;
+
+            // Add dependency to DataTable
+            table.Rows.Add(
+                rootDll,
+                name.Name,
+                name.Version?.ToString() ?? "",
+                nestingLevel
+            );
+
+            try
+            {
+                // Recurse into dependency if resolvable
+                Assembly depAsm = mlc.LoadFromAssemblyName(name);
+
+                WalkDependenciesToDataTable(
+                    rootDll,
+                    depAsm,
+                    mlc,
+                    visited,
+                    nestingLevel + 1,
+                    table
+                );
+            }
+            catch
+            {
+                // Unresolvable dependency is still recorded; just no recursion
+            }
+        }
+    }
+}
