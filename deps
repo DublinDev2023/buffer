@@ -1,0 +1,61 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Reflection;
+using System.Reflection.Metadata;
+using System.Reflection.MetadataLoadContext;
+
+class Program
+{
+    static void Main()
+    {
+        string folder = @"C:\dlls";
+
+        var resolver = new PathAssemblyResolver(
+            Directory.GetFiles(folder, "*.dll")
+        );
+
+        using var mlc = new MetadataLoadContext(resolver);
+
+        foreach (string dllPath in Directory.GetFiles(folder, "*.dll"))
+        {
+            var asm = mlc.LoadFromAssemblyPath(dllPath);
+            var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            Console.WriteLine($"\nDependencies for {Path.GetFileName(dllPath)}:");
+            WalkDependencies(asm, mlc, visited, indent: 1);
+        }
+    }
+
+    static void WalkDependencies(Assembly assembly, MetadataLoadContext mlc, HashSet<string> visited, int indent)
+    {
+        foreach (var name in assembly.GetReferencedAssemblies())
+        {
+            // Skip .NET/Core framework assemblies
+            if (name.Name.StartsWith("System") ||
+                name.Name.StartsWith("Microsoft") ||
+                name.Name.Equals("netstandard"))
+                continue;
+
+            string pad = new string(' ', indent * 2);
+
+            if (visited.Contains(name.Name))
+                continue;
+
+            visited.Add(name.Name);
+
+            Console.WriteLine($"{pad}- {name.Name}");
+
+            try
+            {
+                var depAsm = mlc.LoadFromAssemblyName(name);
+                WalkDependencies(depAsm, mlc, visited, indent + 1);
+            }
+            catch (FileNotFoundException)
+            {
+                Console.WriteLine($"{pad}  (not found in folder)");
+            }
+        }
+    }
+}
