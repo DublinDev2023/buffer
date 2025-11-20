@@ -4,29 +4,39 @@ using System.Data;
 using System.IO;
 using System.Reflection;
 using System.Reflection.MetadataLoadContext;
+using System.Runtime.InteropServices;
 
 class Program
 {
     static void Main()
     {
-        string folder = @"C:\dlls";
+        // Your folder stays as-is. Do NOT change it.
+        string folder = @"C:\dlls";  
 
-        var dllPaths = Directory.GetFiles(folder, "*.dll");
+        // Get path to .NET runtime assemblies (needed by MetadataLoadContext)
+        string runtimeDir = RuntimeEnvironment.GetRuntimeDirectory();
 
-        // Resolver for all DLLs in the directory
-        var resolver = new PathAssemblyResolver(dllPaths);
+        // Build list of assemblies for resolver:
+        // 1. All DLLs in your folder (unchanged)
+        // 2. All DLLs in the .NET runtime folder (required)
+        var assemblyPaths = new List<string>();
+        assemblyPaths.AddRange(Directory.GetFiles(folder, "*.dll"));
+        assemblyPaths.AddRange(Directory.GetFiles(runtimeDir, "*.dll"));
+
+        var resolver = new PathAssemblyResolver(assemblyPaths);
+
         using var mlc = new MetadataLoadContext(resolver);
 
-        // Create the output table
         DataTable table = CreateDependencyTable();
 
-        foreach (string dll in dllPaths)
+        foreach (string dllPath in Directory.GetFiles(folder, "*.dll"))
         {
-            var asm = mlc.LoadFromAssemblyPath(dll);
+            Assembly asm = mlc.LoadFromAssemblyPath(dllPath);
+
             var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             WalkDependenciesToDataTable(
-                rootDll: Path.GetFileName(dll),
+                rootDll: Path.GetFileName(dllPath),
                 assembly: asm,
                 mlc: mlc,
                 visited: visited,
@@ -35,11 +45,14 @@ class Program
             );
         }
 
-        // Output example (optional)
+        // Display results
+        Console.WriteLine("\n=== DEPENDENCIES FOUND ===\n");
+
         foreach (DataRow row in table.Rows)
         {
             Console.WriteLine(
-                $"{row["RootDll"]} -> {row["DependencyDll"]} v{row["DependencyDllVersion"]} (Level {row["NestingLevel"]})");
+                $"{row["RootDll"],-32} → {row["DependencyDll"],-32}  v{row["DependencyDllVersion"],-12}  (Level {row["NestingLevel"]})"
+            );
         }
     }
 
@@ -55,51 +68,3 @@ class Program
 
     static void WalkDependenciesToDataTable(
         string rootDll,
-        Assembly assembly,
-        MetadataLoadContext mlc,
-        HashSet<string> visited,
-        int nestingLevel,
-        DataTable table)
-    {
-        foreach (var name in assembly.GetReferencedAssemblies())
-        {
-            // Skip framework-level assemblies
-            if (name.Name.StartsWith("System") ||
-                name.Name.StartsWith("Microsoft") ||
-                name.Name.Equals("netstandard"))
-                continue;
-
-            if (visited.Contains(name.FullName))
-                continue;
-
-            visited.Add(name.FullName);
-
-            // Add row to DataTable
-            table.Rows.Add(
-                rootDll,
-                name.Name,
-                name.Version?.ToString() ?? "",
-                nestingLevel
-            );
-
-            try
-            {
-                var depAsm = mlc.LoadFromAssemblyName(name);
-
-                // recurse
-                WalkDependenciesToDataTable(
-                    rootDll,
-                    depAsm,
-                    mlc,
-                    visited,
-                    nestingLevel + 1,
-                    table
-                );
-            }
-            catch
-            {
-                // Missing dependency -> still logged in table
-            }
-        }
-    }
-}
