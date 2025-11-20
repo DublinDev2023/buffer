@@ -1,9 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Data;
 using System.IO;
-using System.Linq;
 using System.Reflection;
-using System.Reflection.Metadata;
 using System.Reflection.MetadataLoadContext;
 
 class Program
@@ -12,49 +11,94 @@ class Program
     {
         string folder = @"C:\dlls";
 
-        var resolver = new PathAssemblyResolver(
-            Directory.GetFiles(folder, "*.dll")
-        );
+        var dllPaths = Directory.GetFiles(folder, "*.dll");
 
+        // Resolver for all DLLs in the directory
+        var resolver = new PathAssemblyResolver(dllPaths);
         using var mlc = new MetadataLoadContext(resolver);
 
-        foreach (string dllPath in Directory.GetFiles(folder, "*.dll"))
+        // Create the output table
+        DataTable table = CreateDependencyTable();
+
+        foreach (string dll in dllPaths)
         {
-            var asm = mlc.LoadFromAssemblyPath(dllPath);
+            var asm = mlc.LoadFromAssemblyPath(dll);
             var visited = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            Console.WriteLine($"\nDependencies for {Path.GetFileName(dllPath)}:");
-            WalkDependencies(asm, mlc, visited, indent: 1);
+            WalkDependenciesToDataTable(
+                rootDll: Path.GetFileName(dll),
+                assembly: asm,
+                mlc: mlc,
+                visited: visited,
+                nestingLevel: 1,
+                table: table
+            );
+        }
+
+        // Output example (optional)
+        foreach (DataRow row in table.Rows)
+        {
+            Console.WriteLine(
+                $"{row["RootDll"]} -> {row["DependencyDll"]} v{row["DependencyDllVersion"]} (Level {row["NestingLevel"]})");
         }
     }
 
-    static void WalkDependencies(Assembly assembly, MetadataLoadContext mlc, HashSet<string> visited, int indent)
+    static DataTable CreateDependencyTable()
+    {
+        var dt = new DataTable();
+        dt.Columns.Add("RootDll", typeof(string));
+        dt.Columns.Add("DependencyDll", typeof(string));
+        dt.Columns.Add("DependencyDllVersion", typeof(string));
+        dt.Columns.Add("NestingLevel", typeof(int));
+        return dt;
+    }
+
+    static void WalkDependenciesToDataTable(
+        string rootDll,
+        Assembly assembly,
+        MetadataLoadContext mlc,
+        HashSet<string> visited,
+        int nestingLevel,
+        DataTable table)
     {
         foreach (var name in assembly.GetReferencedAssemblies())
         {
-            // Skip .NET/Core framework assemblies
+            // Skip framework-level assemblies
             if (name.Name.StartsWith("System") ||
                 name.Name.StartsWith("Microsoft") ||
                 name.Name.Equals("netstandard"))
                 continue;
 
-            string pad = new string(' ', indent * 2);
-
-            if (visited.Contains(name.Name))
+            if (visited.Contains(name.FullName))
                 continue;
 
-            visited.Add(name.Name);
+            visited.Add(name.FullName);
 
-            Console.WriteLine($"{pad}- {name.Name}");
+            // Add row to DataTable
+            table.Rows.Add(
+                rootDll,
+                name.Name,
+                name.Version?.ToString() ?? "",
+                nestingLevel
+            );
 
             try
             {
                 var depAsm = mlc.LoadFromAssemblyName(name);
-                WalkDependencies(depAsm, mlc, visited, indent + 1);
+
+                // recurse
+                WalkDependenciesToDataTable(
+                    rootDll,
+                    depAsm,
+                    mlc,
+                    visited,
+                    nestingLevel + 1,
+                    table
+                );
             }
-            catch (FileNotFoundException)
+            catch
             {
-                Console.WriteLine($"{pad}  (not found in folder)");
+                // Missing dependency -> still logged in table
             }
         }
     }
