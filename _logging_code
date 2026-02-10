@@ -1,0 +1,25 @@
+using Microsoft.AspNetCore.Builder;
+using Prometheus;
+
+var app = WebApplication.Create(args);
+
+app.MapGet("/", () => "OK. Metrics at /metrics");
+app.MapMetrics("/metrics");
+
+// One metric (Pods) that changes over time
+var pods = Metrics.CreateGauge("myapp_pods", "Number of pods");
+
+_ = Task.Run(async () =>
+{
+    var rnd = new Random();
+    while (true)
+    {
+        pods.Set(rnd.Next(1, 11));      // 1..10
+        await Task.Delay(500);          // 500ms
+    }
+});
+
+app.Run("http://localhost:5055");
+
+
+// prometheus-net.AspNetCore
