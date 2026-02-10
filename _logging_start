@@ -1,0 +1,53 @@
+@echo off
+setlocal
+
+rem =========================
+rem Configuration
+rem =========================
+set PROM_HOME=C:\tools\prometheus
+set PROM_EXE=%PROM_HOME%\prometheus.exe
+set PROM_CFG=%PROM_HOME%\prometheus.yml
+
+set GRAF_HOME=C:\tools\grafana
+set GRAF_EXE=%GRAF_HOME%\bin\grafana-server.exe
+
+rem =========================
+rem Start Prometheus
+rem =========================
+if not exist "%PROM_EXE%" (
+  echo ERROR: Prometheus exe not found: %PROM_EXE%
+  goto :end
+)
+
+if not exist "%PROM_CFG%" (
+  echo ERROR: Prometheus config not found: %PROM_CFG%
+  goto :end
+)
+
+echo Starting Prometheus...
+start "Prometheus" /D "%PROM_HOME%" "%PROM_EXE%" --config.file="%PROM_CFG%"
+echo   http://localhost:9090
+
+rem =========================
+rem Start Grafana
+rem =========================
+if not exist "%GRAF_EXE%" (
+  echo ERROR: Grafana exe not found: %GRAF_EXE%
+  goto :end
+)
+
+echo Starting Grafana...
+start "Grafana" /D "%GRAF_HOME%\bin" "%GRAF_EXE%"
+echo   http://localhost:3000
+
+rem =========================
+rem Done
+rem =========================
+echo.
+echo Stack started.
+echo App metrics: http://localhost:5055/metrics
+echo Prometheus:  http://localhost:9090
+echo Grafana:     http://localhost:3000
+
+:end
+endlocal
