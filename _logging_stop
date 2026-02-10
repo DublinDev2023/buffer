@@ -1,0 +1,32 @@
+@echo off
+setlocal
+
+echo Stopping Grafana...
+taskkill /F /IM grafana-server.exe >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+  echo   Grafana stopped.
+) else (
+  echo   Grafana not running.
+)
+
+echo.
+echo Stopping Prometheus...
+taskkill /F /IM prometheus.exe >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+  echo   Prometheus stopped.
+) else (
+  echo   Prometheus not running.
+)
+
+echo.
+echo Stopping .NET app (dotnet run)...
+taskkill /F /IM dotnet.exe >nul 2>&1
+if %ERRORLEVEL% EQU 0 (
+  echo   dotnet process stopped.
+) else (
+  echo   dotnet not running (or app was started differently).
+)
+
+echo.
+echo Stack stopped.
+endlocal
