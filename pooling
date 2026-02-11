@@ -79,4 +79,8 @@ FROM sys.dm_exec_requests r
 CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
 WHERE r.session_id = @spid;
 
+--terminal
+
+time nc -vz <sql-host> 1433
+
 
