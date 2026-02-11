@@ -1,0 +1,9 @@
+SELECT
+  s.login_name,
+  s.host_name,
+  s.program_name,
+  COUNT(*) AS session_count
+FROM sys.dm_exec_sessions s
+WHERE s.is_user_process = 1
+GROUP BY s.login_name, s.host_name, s.program_name
+ORDER BY session_count DESC;
