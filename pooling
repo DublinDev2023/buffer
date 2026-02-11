@@ -1,11 +1,16 @@
-cat /sys/fs/cgroup/cpu/cpu.cfs_quota_us
-cat /sys/fs/cgroup/cpu/cpu.cfs_period_us
+static void LogThreadPool(string tag)
+{
+    ThreadPool.GetAvailableThreads(out var wAvail, out var ioAvail);
+    ThreadPool.GetMaxThreads(out var wMax, out var ioMax);
+    ThreadPool.GetMinThreads(out var wMin, out var ioMin);
 
+    Console.WriteLine($"{DateTime.UtcNow:O} {tag} TP worker avail={wAvail}/{wMax} (min={wMin}) | IO avail={ioAvail}/{ioMax} (min={ioMin})");
+}
 
+LogThreadPool("BEFORE DB");
+var sw = Stopwatch.StartNew();
+var x = dbWrapper.ExecuteScalar<int>("SELECT 1"); // sync call
+sw.Stop();
+LogThreadPool("AFTER DB");
 
-echo "BEFORE"; cat /sys/fs/cgroup/cpu/cpu.stat
-sleep 10
-echo "AFTER";  cat /sys/fs/cgroup/cpu/cpu.stat
-
-
-WAITFOR DELAY '00:00:01'; SELECT 1;
+Console.WriteLine($"DB call took {sw.ElapsedMilliseconds} ms");
