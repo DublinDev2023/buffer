@@ -86,3 +86,22 @@ time nc -vz <sql-host> 1433
 time sqlcmd -S <sql-host> -U <user> -P '<pass>' -Q "SET NOCOUNT ON; SELECT 1;"
 
 
+static void LogResolvedDefaults(string cs)
+{
+    var b = new SqlConnectionStringBuilder(cs);
+
+    // Overwrite for logging only (does NOT modify the real connection)
+    if (!string.IsNullOrEmpty(b.Password))
+        b.Password = "****";
+
+    Console.WriteLine(
+        $"Pooling={b.Pooling} " +
+        $"MinPoolSize={b.MinPoolSize} " +
+        $"MaxPoolSize={b.MaxPoolSize} " +
+        $"ConnectTimeout={b.ConnectTimeout} " +
+        $"Encrypt={b.Encrypt} " +
+        $"TrustServerCertificate={b.TrustServerCertificate} " +
+        $"MARS={b.MultipleActiveResultSets} " +
+        $"ApplicationName={b.ApplicationName}");
+}
+
