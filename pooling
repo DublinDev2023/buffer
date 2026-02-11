@@ -83,4 +83,6 @@ WHERE r.session_id = @spid;
 
 time nc -vz <sql-host> 1433
 
+time sqlcmd -S <sql-host> -U <user> -P '<pass>' -Q "SET NOCOUNT ON; SELECT 1;"
+
 
