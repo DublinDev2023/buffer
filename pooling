@@ -6,3 +6,6 @@ cat /sys/fs/cgroup/cpu/cpu.cfs_period_us
 echo "BEFORE"; cat /sys/fs/cgroup/cpu/cpu.stat
 sleep 10
 echo "AFTER";  cat /sys/fs/cgroup/cpu/cpu.stat
+
+
+WAITFOR DELAY '00:00:01'; SELECT 1;
