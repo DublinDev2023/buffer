@@ -105,3 +105,9 @@ static void LogResolvedDefaults(string cs)
         $"ApplicationName={b.ApplicationName}");
 }
 
+
+cat /sys/fs/cgroup/cpu.max (or v1 quota/period)
+
+cat /sys/fs/cgroup/cpu.stat twice (before + during load)
+
+
