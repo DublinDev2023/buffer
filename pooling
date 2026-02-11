@@ -7,3 +7,76 @@ FROM sys.dm_exec_sessions s
 WHERE s.is_user_process = 1
 GROUP BY s.login_name, s.host_name, s.program_name
 ORDER BY session_count DESC;
+
+
+-- Find sessions for your app/login
+SELECT TOP (50)
+    s.session_id,
+    s.login_name,
+    s.host_name,
+    s.program_name,
+    s.status,
+    s.login_time,
+    c.client_net_address,
+    c.net_transport,
+    c.protocol_type,
+    c.encrypt_option,
+    c.auth_scheme,
+    c.connect_time,
+    c.num_reads, c.num_writes,
+    c.last_read, c.last_write
+FROM sys.dm_exec_sessions s
+JOIN sys.dm_exec_connections c
+  ON s.session_id = c.session_id
+WHERE s.is_user_process = 1
+  AND s.login_name = N'YourSlowLoginHere'
+  AND (s.program_name LIKE N'%MyService-OpenShift%' OR s.host_name LIKE N'%pod%')
+ORDER BY s.login_time DESC;
+
+
+--session
+
+DECLARE @spid int = <session_id_from_above>;
+
+SELECT
+    r.session_id,
+    r.status,
+    r.command,
+    r.wait_type,
+    r.wait_time AS wait_time_ms,
+    r.blocking_session_id,
+    r.cpu_time AS cpu_time_ms,
+    r.total_elapsed_time AS elapsed_time_ms,
+    r.logical_reads, r.reads, r.writes,
+    DB_NAME(r.database_id) AS dbname
+FROM sys.dm_exec_requests r
+WHERE r.session_id = @spid;
+
+SELECT TOP (10)
+    wt.wait_type,
+    wt.wait_duration_ms,
+    wt.blocking_session_id,
+    wt.resource_description
+FROM sys.dm_os_waiting_tasks wt
+WHERE wt.session_id = @spid
+ORDER BY wt.wait_duration_ms DESC;
+
+
+
+--server view: 
+
+DECLARE @spid int = <pod_session_id>;
+
+SELECT
+    t.text,
+    r.statement_start_offset,
+    r.statement_end_offset,
+    r.cpu_time,
+    r.total_elapsed_time,
+    r.logical_reads,
+    r.plan_handle
+FROM sys.dm_exec_requests r
+CROSS APPLY sys.dm_exec_sql_text(r.sql_handle) t
+WHERE r.session_id = @spid;
+
+
